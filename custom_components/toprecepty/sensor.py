@@ -55,13 +55,15 @@ class TopReceptyCoordinator:
         self.update_interval = timedelta(hours=update_interval)
         self.recipes = []
         self.data_dir = Path(hass.config.path("custom_components", DOMAIN, "data"))
-        self.images_dir = self.data_dir / IMAGES_DIR
         self.data_file = self.data_dir / DATA_FILE
+        # Store daily recipe image in www folder for Lovelace access
+        self.www_dir = Path(hass.config.path("www", "toprecepty"))
+        self.daily_image_filename = "daily_recipe.jpg"
         self.last_update = None
 
         # Create directories
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.www_dir.mkdir(parents=True, exist_ok=True)
 
     async def async_fetch_recipes(self) -> None:
         """Fetch recipes from toprecepty.cz."""
@@ -155,11 +157,6 @@ class TopReceptyCoordinator:
                 if image_url and not image_url.startswith("http"):
                     image_url = BASE_URL + image_url if image_url.startswith("/") else f"{BASE_URL}/{image_url}"
 
-            # Download image
-            local_image = None
-            if image_url:
-                local_image = await self._download_image(image_url, session)
-
             # Try to get description
             description = ""
             desc_elem = item.find("p")
@@ -171,7 +168,6 @@ class TopReceptyCoordinator:
                 "title": title,
                 "url": url,
                 "image_url": image_url,
-                "local_image": local_image,
                 "description": description,
                 "fetched_at": datetime.now().isoformat(),
             }
@@ -182,25 +178,24 @@ class TopReceptyCoordinator:
             _LOGGER.error(f"Error parsing recipe item: {err}")
             return None
 
-    async def _download_image(self, image_url: str, session) -> str | None:
-        """Download recipe image."""
-        try:
-            # Create filename from URL
-            filename = f"{abs(hash(image_url)) % (10 ** 10)}.jpg"
-            filepath = self.images_dir / filename
+    async def download_daily_recipe_image(self, image_url: str) -> str | None:
+        """Download daily recipe image and save as daily_recipe.jpg."""
+        if not image_url:
+            return None
 
-            # Skip if already downloaded
-            if filepath.exists():
-                return str(filepath.relative_to(self.data_dir))
+        try:
+            session = async_get_clientsession(self.hass)
+            filepath = self.www_dir / self.daily_image_filename
 
             async with session.get(image_url, timeout=10) as response:
                 if response.status == 200:
                     content = await response.read()
                     filepath.write_bytes(content)
-                    return str(filepath.relative_to(self.data_dir))
+                    # Return path accessible from Lovelace
+                    return f"/local/toprecepty/{self.daily_image_filename}"
 
         except Exception as err:
-            _LOGGER.error(f"Error downloading image {image_url}: {err}")
+            _LOGGER.error(f"Error downloading daily recipe image {image_url}: {err}")
 
         return None
 
@@ -263,6 +258,8 @@ class DailyRecipeSensor(SensorEntity):
         self._attr_name = SENSOR_NAME
         self._attr_unique_id = f"{DOMAIN}_daily_recipe"
         self._attr_icon = SENSOR_ICON
+        self._current_recipe_id = None
+        self._local_image_path = None
 
     @property
     def state(self) -> str | None:
@@ -284,7 +281,7 @@ class DailyRecipeSensor(SensorEntity):
             "title": recipe.get("title"),
             "url": recipe.get("url"),
             "image_url": recipe.get("image_url"),
-            "local_image": recipe.get("local_image"),
+            "local_image": self._local_image_path,
             "description": recipe.get("description"),
             "total_recipes": len(self._coordinator.recipes),
             "last_update": self._coordinator.last_update.isoformat()
@@ -302,3 +299,17 @@ class DailyRecipeSensor(SensorEntity):
             > self._coordinator.update_interval
         ):
             await self._coordinator.async_fetch_recipes()
+
+        # Download image for daily recipe if it changed
+        recipe = self._coordinator.get_daily_recipe()
+        if recipe:
+            recipe_id = recipe.get("id")
+            # Download image only if recipe changed
+            if recipe_id != self._current_recipe_id:
+                self._current_recipe_id = recipe_id
+                image_url = recipe.get("image_url")
+                if image_url:
+                    self._local_image_path = await self._coordinator.download_daily_recipe_image(image_url)
+                    _LOGGER.info(f"Downloaded daily recipe image: {self._local_image_path}")
+                else:
+                    self._local_image_path = None

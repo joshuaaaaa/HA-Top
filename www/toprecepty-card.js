@@ -156,12 +156,13 @@ class TopReceptyCard extends HTMLElement {
       titleElement.textContent = attributes.title || 'Žádný recept';
     }
 
-    // Update image
+    // Update image - prefer local_image, fallback to image_url
     const imageElement = this.querySelector('.recipe-image');
     const imageContainer = this.querySelector('.recipe-image-container');
     if (imageElement && imageContainer) {
-      if (attributes.image_url) {
-        imageElement.src = attributes.image_url;
+      const imageSource = attributes.local_image || attributes.image_url;
+      if (imageSource) {
+        imageElement.src = imageSource;
         imageElement.alt = attributes.title || 'Náhled receptu';
         imageContainer.style.display = 'block';
       } else {
