@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -169,6 +170,7 @@ class TopReceptyCoordinator:
                 "url": url,
                 "image_url": image_url,
                 "description": description,
+                "prep_time": None,  # Will be fetched when recipe becomes daily recipe
                 "fetched_at": datetime.now().isoformat(),
             }
 
@@ -198,6 +200,72 @@ class TopReceptyCoordinator:
             _LOGGER.error(f"Error downloading daily recipe image {image_url}: {err}")
 
         return None
+
+    async def fetch_recipe_details(self, recipe_url: str) -> dict:
+        """Fetch additional details from recipe page."""
+        details = {"prep_time": None, "servings": None}
+
+        try:
+            session = async_get_clientsession(self.hass)
+
+            async with session.get(recipe_url, timeout=15) as response:
+                if response.status != 200:
+                    return details
+
+                html = await response.text()
+                soup = BeautifulSoup(html, "html.parser")
+
+                # Try to find prep time
+                # Common patterns: "Čas přípravy:", "Příprava:", etc.
+                prep_time_keywords = ["čas přípravy", "příprava", "čas"]
+
+                for keyword in prep_time_keywords:
+                    # Try to find in text
+                    text_elements = soup.find_all(text=lambda t: t and keyword in t.lower())
+
+                    for elem in text_elements:
+                        # Look for time patterns (e.g., "30 min", "1 hod", "45 minut")
+                        import re
+                        time_pattern = r'(\d+)\s*(min|minut|hod|hodin)'
+
+                        # Check the element and its parent
+                        parent = elem.parent if hasattr(elem, 'parent') else None
+                        if parent:
+                            parent_text = parent.get_text()
+                            match = re.search(time_pattern, parent_text, re.IGNORECASE)
+                            if match:
+                                details["prep_time"] = match.group(0)
+                                break
+
+                    if details["prep_time"]:
+                        break
+
+                # Try to find servings/portions
+                servings_keywords = ["porce", "porcí", "porci"]
+                for keyword in servings_keywords:
+                    text_elements = soup.find_all(text=lambda t: t and keyword in t.lower())
+
+                    for elem in text_elements:
+                        import re
+                        servings_pattern = r'(\d+)\s*porc'
+
+                        parent = elem.parent if hasattr(elem, 'parent') else None
+                        if parent:
+                            parent_text = parent.get_text()
+                            match = re.search(servings_pattern, parent_text, re.IGNORECASE)
+                            if match:
+                                details["servings"] = int(match.group(1))
+                                break
+
+                    if details["servings"]:
+                        break
+
+                _LOGGER.debug(f"Fetched details for recipe: {details}")
+
+        except Exception as err:
+            _LOGGER.error(f"Error fetching recipe details from {recipe_url}: {err}")
+
+        return details
 
     async def _save_recipes(self) -> None:
         """Save recipes to JSON file."""
@@ -283,6 +351,8 @@ class DailyRecipeSensor(SensorEntity):
             "image_url": recipe.get("image_url"),
             "local_image": self._local_image_path,
             "description": recipe.get("description"),
+            "prep_time": recipe.get("prep_time"),
+            "servings": recipe.get("servings"),
             "total_recipes": len(self._coordinator.recipes),
             "last_update": self._coordinator.last_update.isoformat()
             if self._coordinator.last_update
@@ -300,16 +370,28 @@ class DailyRecipeSensor(SensorEntity):
         ):
             await self._coordinator.async_fetch_recipes()
 
-        # Download image for daily recipe if it changed
+        # Download image and fetch details for daily recipe if it changed
         recipe = self._coordinator.get_daily_recipe()
         if recipe:
             recipe_id = recipe.get("id")
-            # Download image only if recipe changed
+            # Download image and fetch details only if recipe changed
             if recipe_id != self._current_recipe_id:
                 self._current_recipe_id = recipe_id
+
+                # Download image
                 image_url = recipe.get("image_url")
                 if image_url:
                     self._local_image_path = await self._coordinator.download_daily_recipe_image(image_url)
                     _LOGGER.info(f"Downloaded daily recipe image: {self._local_image_path}")
                 else:
                     self._local_image_path = None
+
+                # Fetch recipe details (prep time, servings)
+                recipe_url = recipe.get("url")
+                if recipe_url and not recipe.get("prep_time"):
+                    details = await self._coordinator.fetch_recipe_details(recipe_url)
+                    recipe["prep_time"] = details.get("prep_time")
+                    recipe["servings"] = details.get("servings")
+                    # Save updated recipe data
+                    await self._coordinator._save_recipes()
+                    _LOGGER.info(f"Fetched recipe details: prep_time={details.get('prep_time')}, servings={details.get('servings')}")

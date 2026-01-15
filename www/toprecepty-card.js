@@ -18,8 +18,16 @@ class TopReceptyCard extends HTMLElement {
               <p class="recipe-description"></p>
               <div class="recipe-stats">
                 <span class="stat">
+                  <ha-icon icon="mdi:clock-outline"></ha-icon>
+                  <span class="stat-value"><span class="prep-time">N/A</span></span>
+                </span>
+                <span class="stat">
+                  <ha-icon icon="mdi:account-multiple"></ha-icon>
+                  <span class="stat-value"><span class="servings">?</span> porcí</span>
+                </span>
+                <span class="stat">
                   <ha-icon icon="mdi:silverware-fork-knife"></ha-icon>
-                  <span class="stat-value">Celkem receptů: <span class="total-recipes">0</span></span>
+                  <span class="stat-value"><span class="total-recipes">0</span> receptů</span>
                 </span>
               </div>
               <a class="recipe-link" href="#" target="_blank">
@@ -74,7 +82,8 @@ class TopReceptyCard extends HTMLElement {
 
         .recipe-stats {
           display: flex;
-          gap: 16px;
+          flex-wrap: wrap;
+          gap: 12px;
           margin-bottom: 16px;
           padding: 12px;
           background: var(--secondary-background-color);
@@ -84,7 +93,9 @@ class TopReceptyCard extends HTMLElement {
         .stat {
           display: flex;
           align-items: center;
-          gap: 8px;
+          gap: 6px;
+          flex: 1;
+          min-width: fit-content;
         }
 
         .stat ha-icon {
@@ -160,12 +171,35 @@ class TopReceptyCard extends HTMLElement {
     const imageElement = this.querySelector('.recipe-image');
     const imageContainer = this.querySelector('.recipe-image-container');
     if (imageElement && imageContainer) {
-      const imageSource = attributes.local_image || attributes.image_url;
+      // Use local_image if available, otherwise use image_url
+      let imageSource = null;
+
+      if (attributes.local_image && attributes.local_image !== 'None' && attributes.local_image !== '') {
+        imageSource = attributes.local_image;
+        console.log('TopRecepty: Using local image:', imageSource);
+      } else if (attributes.image_url && attributes.image_url !== 'None' && attributes.image_url !== '') {
+        imageSource = attributes.image_url;
+        console.log('TopRecepty: Using remote image:', imageSource);
+      }
+
       if (imageSource) {
         imageElement.src = imageSource;
         imageElement.alt = attributes.title || 'Náhled receptu';
         imageContainer.style.display = 'block';
+
+        // Add error handler for image loading
+        imageElement.onerror = () => {
+          console.error('TopRecepty: Failed to load image:', imageSource);
+          // Try fallback to remote image if local fails
+          if (imageSource === attributes.local_image && attributes.image_url) {
+            console.log('TopRecepty: Trying fallback to remote image');
+            imageElement.src = attributes.image_url;
+          } else {
+            imageContainer.style.display = 'none';
+          }
+        };
       } else {
+        console.log('TopRecepty: No image available');
         imageContainer.style.display = 'none';
       }
     }
@@ -181,19 +215,33 @@ class TopReceptyCard extends HTMLElement {
       }
     }
 
+    // Update prep time
+    const prepTimeElement = this.querySelector('.prep-time');
+    if (prepTimeElement) {
+      prepTimeElement.textContent = attributes.prep_time || 'N/A';
+    }
+
+    // Update servings
+    const servingsElement = this.querySelector('.servings');
+    if (servingsElement) {
+      servingsElement.textContent = attributes.servings || '?';
+    }
+
     // Update total recipes
     const totalElement = this.querySelector('.total-recipes');
     if (totalElement) {
       totalElement.textContent = attributes.total_recipes || '0';
     }
 
-    // Update link
+    // Update link - always show button if URL exists
     const linkElement = this.querySelector('.recipe-link');
-    if (linkElement && attributes.url) {
-      linkElement.href = attributes.url;
-      linkElement.style.display = 'block';
-    } else if (linkElement) {
-      linkElement.style.display = 'none';
+    if (linkElement) {
+      if (attributes.url) {
+        linkElement.href = attributes.url;
+        linkElement.style.display = 'block';
+      } else {
+        linkElement.style.display = 'none';
+      }
     }
   }
 
