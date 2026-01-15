@@ -11,8 +11,9 @@ Integrace pro Home Assistant, která načítá recepty z [toprecepty.cz](https:/
 - 💾 **Lokální ukládání** - Všechny recepty se ukládají do JSON souboru
 - 🖼️ **Optimalizované obrázky** - Stahuje se pouze obrázek aktuálního denního receptu (šetří místo na disku)
 - ⏱️ **Čas přípravy** - Automatické načítání času přípravy z detailu receptu
-- 👥 **Počet porcí** - Zobrazení počtu porcí na kartě
-- 🎨 **Vlastní Lovelace karta** - Krásné zobrazení receptu s obrázkem, časem, porcemi a odkazem
+- ⭐ **Hodnocení** - Zobrazení hodnocení receptu s počtem hlasů
+- 📊 **Obtížnost** - Informace o obtížnosti přípravy (Snadný/Střední/Náročný)
+- 🎨 **Vlastní Lovelace karta** - Krásné zobrazení receptu s obrázkem, časem, hodnocením, obtížností a odkazem
 - 🔄 **Automatická aktualizace** - Pravidelné načítání nových receptů (nastavitelný interval)
 - ⚙️ **Snadná konfigurace** - Nastavení přes Home Assistant UI
 
@@ -89,8 +90,9 @@ Integrace vytvoří senzor `sensor.denni_recept` s následujícími atributy:
 | `description` | Krátký popis receptu |
 | `prep_time` | Čas přípravy (např. "30 min", "1 hod") |
 | `servings` | Počet porcí |
+| `rating` | Hodnocení receptu s počtem hlasů (např. "4,7 (83x)") |
+| `difficulty` | Obtížnost přípravy (Snadný/Střední/Náročný) |
 | `recipe_id` | Jedinečné ID receptu |
-| `total_recipes` | Celkový počet načtených receptů |
 | `last_update` | Datum a čas poslední aktualizace |
 
 ## 🎨 Příklady použití
@@ -210,6 +212,13 @@ Interval se nastavuje při přidání integrace, ale můžete ho změnit:
 3. Zkuste manuálně aktualizovat senzor
 
 ## 📝 Changelog
+
+### Version 1.0.4 (2026-01-15)
+
+- ⭐ **Hodnocení receptu** - automatické načítání hodnocení s počtem hlasů (např. "4,7 (83x)")
+- 📊 **Obtížnost** - zobrazení obtížnosti přípravy (Snadný/Střední/Náročný)
+- 🎨 **Nové zobrazení karty** - ikony: hodiny ⏱️, hvězdička ⭐, graf 📊
+- ❌ **Odstraněno** - počet receptů z karty (nahrazen hodnocením a obtížností)
 
 ### Version 1.0.3 (2026-01-15)
 
