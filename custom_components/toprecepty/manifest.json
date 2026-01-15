@@ -1,0 +1,10 @@
+{
+  "domain": "toprecepty",
+  "name": "Top Recepty",
+  "documentation": "https://github.com/joshuaaaaa/HA-Top",
+  "dependencies": [],
+  "codeowners": [],
+  "requirements": ["aiohttp>=3.8.0", "beautifulsoup4>=4.11.0"],
+  "version": "1.0.0",
+  "iot_class": "cloud_polling"
+}

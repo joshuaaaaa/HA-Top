@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Top Recepty",
+        "description": "Configure the integration to fetch recipes from toprecepty.cz",
+        "data": {
+          "update_interval": "Update interval (hours)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to server",
+      "invalid_interval": "Invalid update interval",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This integration is already configured"
+    }
+  }
+}
