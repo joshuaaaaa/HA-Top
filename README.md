@@ -9,7 +9,7 @@ Integrace pro Home Assistant, která načítá recepty z [toprecepty.cz](https:/
 
 - 📖 **Denní recept** - Každý den se zobrazí jiný recept z načtené databáze
 - 💾 **Lokální ukládání** - Všechny recepty se ukládají do JSON souboru
-- 🖼️ **Náhledy receptů** - Automatické stahování a ukládání obrázků receptů
+- 🖼️ **Optimalizované obrázky** - Stahuje se pouze obrázek aktuálního denního receptu (šetří místo na disku)
 - 🎨 **Vlastní Lovelace karta** - Krásné zobrazení receptu s obrázkem a odkazem
 - 🔄 **Automatická aktualizace** - Pravidelné načítání nových receptů (nastavitelný interval)
 - ⚙️ **Snadná konfigurace** - Nastavení přes Home Assistant UI
@@ -141,11 +141,16 @@ HA-Top/
 │       ├── const.py            # Konstanty
 │       ├── config_flow.py      # Konfigurace přes UI
 │       ├── sensor.py           # Implementace senzoru
+│       ├── strings.json        # Překlady pro UI
+│       ├── translations/       # Lokalizace
+│       │   ├── cs.json
+│       │   └── en.json
 │       └── data/               # Automaticky vytvořená složka
-│           ├── toprecepty_recipes.json    # Uložené recepty
-│           └── toprecepty_images/         # Stažené obrázky
+│           └── toprecepty_recipes.json    # Uložené recepty
 ├── www/
-│   └── toprecepty-card.js      # Custom Lovelace karta
+│   ├── toprecepty-card.js      # Custom Lovelace karta
+│   └── toprecepty/             # Automaticky vytvořená složka
+│       └── daily_recipe.jpg    # Obrázek denního receptu (přepisuje se)
 ├── hacs.json                   # HACS konfigurace
 ├── info.md                     # Informace pro HACS
 └── README.md                   # Tento soubor
@@ -201,6 +206,19 @@ Interval se nastavuje při přidání integrace, ale můžete ho změnit:
 3. Zkuste manuálně aktualizovat senzor
 
 ## 📝 Changelog
+
+### Version 1.0.2 (2026-01-15)
+
+- 🚀 **Optimalizace stahování obrázků** - stahuje se pouze jeden obrázek denního receptu
+- 💾 **Úspora místa** - obrázek se ukládá jako `daily_recipe.jpg` a přepisuje se při změně receptu
+- 🖼️ **Opraveno zobrazení** - obrázky se nyní správně zobrazují v Lovelace kartě
+- 📁 **Nové umístění** - obrázky se ukládají do `www/toprecepty/` pro lepší přístup
+
+### Version 1.0.1 (2026-01-15)
+
+- ✨ Přidána podpora pro konfiguraci přes UI
+- 📝 Přidán `strings.json` soubor
+- ⚙️ Aktualizován `manifest.json` s `config_flow: true`
 
 ### Version 1.0.0 (2026-01-15)
 
