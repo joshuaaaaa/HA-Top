@@ -171,6 +171,9 @@ class TopReceptyCoordinator:
                 "image_url": image_url,
                 "description": description,
                 "prep_time": None,  # Will be fetched when recipe becomes daily recipe
+                "servings": None,
+                "rating": None,
+                "difficulty": None,
                 "fetched_at": datetime.now().isoformat(),
             }
 
@@ -203,7 +206,7 @@ class TopReceptyCoordinator:
 
     async def fetch_recipe_details(self, recipe_url: str) -> dict:
         """Fetch additional details from recipe page."""
-        details = {"prep_time": None, "servings": None}
+        details = {"prep_time": None, "servings": None, "rating": None, "difficulty": None}
 
         try:
             session = async_get_clientsession(self.hass)
@@ -258,6 +261,34 @@ class TopReceptyCoordinator:
                                 break
 
                     if details["servings"]:
+                        break
+
+                # Try to find rating (e.g., "4,7 (83x)")
+                rating_pattern = r'(\d+,\d+)\s*\((\d+)x?\)'
+                rating_matches = soup.find_all(text=lambda t: t and re.search(rating_pattern, str(t)))
+                if rating_matches:
+                    for match_text in rating_matches:
+                        match = re.search(rating_pattern, str(match_text))
+                        if match:
+                            rating_value = match.group(1)
+                            rating_count = match.group(2)
+                            details["rating"] = f"{rating_value} ({rating_count}x)"
+                            break
+
+                # Try to find difficulty
+                difficulty_keywords = ["snadný", "snadná", "střední", "středně", "náročný", "náročná", "obtížný", "obtížná"]
+                for keyword in difficulty_keywords:
+                    text_elements = soup.find_all(text=lambda t: t and keyword in t.lower())
+                    if text_elements:
+                        # Get the text and clean it
+                        difficulty_text = text_elements[0].strip()
+                        # Normalize to single word
+                        if "snadn" in difficulty_text.lower():
+                            details["difficulty"] = "Snadný"
+                        elif "střed" in difficulty_text.lower():
+                            details["difficulty"] = "Střední"
+                        elif "nároč" in difficulty_text.lower() or "obtíž" in difficulty_text.lower():
+                            details["difficulty"] = "Náročný"
                         break
 
                 _LOGGER.debug(f"Fetched details for recipe: {details}")
@@ -353,7 +384,8 @@ class DailyRecipeSensor(SensorEntity):
             "description": recipe.get("description"),
             "prep_time": recipe.get("prep_time"),
             "servings": recipe.get("servings"),
-            "total_recipes": len(self._coordinator.recipes),
+            "rating": recipe.get("rating"),
+            "difficulty": recipe.get("difficulty"),
             "last_update": self._coordinator.last_update.isoformat()
             if self._coordinator.last_update
             else None,
@@ -386,12 +418,14 @@ class DailyRecipeSensor(SensorEntity):
                 else:
                     self._local_image_path = None
 
-                # Fetch recipe details (prep time, servings)
+                # Fetch recipe details (prep time, servings, rating, difficulty)
                 recipe_url = recipe.get("url")
                 if recipe_url and not recipe.get("prep_time"):
                     details = await self._coordinator.fetch_recipe_details(recipe_url)
                     recipe["prep_time"] = details.get("prep_time")
                     recipe["servings"] = details.get("servings")
+                    recipe["rating"] = details.get("rating")
+                    recipe["difficulty"] = details.get("difficulty")
                     # Save updated recipe data
                     await self._coordinator._save_recipes()
-                    _LOGGER.info(f"Fetched recipe details: prep_time={details.get('prep_time')}, servings={details.get('servings')}")
+                    _LOGGER.info(f"Fetched recipe details: prep_time={details.get('prep_time')}, servings={details.get('servings')}, rating={details.get('rating')}, difficulty={details.get('difficulty')}")

@@ -22,12 +22,12 @@ class TopReceptyCard extends HTMLElement {
                   <span class="stat-value"><span class="prep-time">N/A</span></span>
                 </span>
                 <span class="stat">
-                  <ha-icon icon="mdi:account-multiple"></ha-icon>
-                  <span class="stat-value"><span class="servings">?</span> porcí</span>
+                  <ha-icon icon="mdi:star"></ha-icon>
+                  <span class="stat-value"><span class="rating">?</span></span>
                 </span>
                 <span class="stat">
-                  <ha-icon icon="mdi:silverware-fork-knife"></ha-icon>
-                  <span class="stat-value"><span class="total-recipes">0</span> receptů</span>
+                  <ha-icon icon="mdi:chart-line"></ha-icon>
+                  <span class="stat-value"><span class="difficulty">?</span></span>
                 </span>
               </div>
               <a class="recipe-link" href="#" target="_blank">
@@ -221,16 +221,16 @@ class TopReceptyCard extends HTMLElement {
       prepTimeElement.textContent = attributes.prep_time || 'N/A';
     }
 
-    // Update servings
-    const servingsElement = this.querySelector('.servings');
-    if (servingsElement) {
-      servingsElement.textContent = attributes.servings || '?';
+    // Update rating
+    const ratingElement = this.querySelector('.rating');
+    if (ratingElement) {
+      ratingElement.textContent = attributes.rating || '?';
     }
 
-    // Update total recipes
-    const totalElement = this.querySelector('.total-recipes');
-    if (totalElement) {
-      totalElement.textContent = attributes.total_recipes || '0';
+    // Update difficulty
+    const difficultyElement = this.querySelector('.difficulty');
+    if (difficultyElement) {
+      difficultyElement.textContent = attributes.difficulty || '?';
     }
 
     // Update link - always show button if URL exists
