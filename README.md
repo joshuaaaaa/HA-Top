@@ -10,7 +10,9 @@ Integrace pro Home Assistant, která načítá recepty z [toprecepty.cz](https:/
 - 📖 **Denní recept** - Každý den se zobrazí jiný recept z načtené databáze
 - 💾 **Lokální ukládání** - Všechny recepty se ukládají do JSON souboru
 - 🖼️ **Optimalizované obrázky** - Stahuje se pouze obrázek aktuálního denního receptu (šetří místo na disku)
-- 🎨 **Vlastní Lovelace karta** - Krásné zobrazení receptu s obrázkem a odkazem
+- ⏱️ **Čas přípravy** - Automatické načítání času přípravy z detailu receptu
+- 👥 **Počet porcí** - Zobrazení počtu porcí na kartě
+- 🎨 **Vlastní Lovelace karta** - Krásné zobrazení receptu s obrázkem, časem, porcemi a odkazem
 - 🔄 **Automatická aktualizace** - Pravidelné načítání nových receptů (nastavitelný interval)
 - ⚙️ **Snadná konfigurace** - Nastavení přes Home Assistant UI
 
@@ -83,8 +85,10 @@ Integrace vytvoří senzor `sensor.denni_recept` s následujícími atributy:
 | `title` | Název receptu |
 | `url` | Odkaz na celý recept na toprecepty.cz |
 | `image_url` | URL obrázku receptu |
-| `local_image` | Cesta k lokálně uloženému obrázku |
+| `local_image` | Cesta k lokálně uloženému obrázku (`/local/toprecepty/daily_recipe.jpg`) |
 | `description` | Krátký popis receptu |
+| `prep_time` | Čas přípravy (např. "30 min", "1 hod") |
+| `servings` | Počet porcí |
 | `recipe_id` | Jedinečné ID receptu |
 | `total_recipes` | Celkový počet načtených receptů |
 | `last_update` | Datum a čas poslední aktualizace |
@@ -206,6 +210,15 @@ Interval se nastavuje při přidání integrace, ale můžete ho změnit:
 3. Zkuste manuálně aktualizovat senzor
 
 ## 📝 Changelog
+
+### Version 1.0.3 (2026-01-15)
+
+- ⏱️ **Čas přípravy** - automatické načítání času přípravy z detailu receptu
+- 👥 **Počet porcí** - zobrazení počtu porcí na kartě
+- 🎨 **Vylepšené zobrazení** - responzivní layout statistik (čas, porce, celkem receptů)
+- 🖼️ **Lepší fallback obrázků** - automatický fallback z lokálního obrázku na vzdálený
+- 🐛 **Debug konzole** - lepší diagnostika problémů s načítáním obrázků
+- 🔧 **Opraveno tlačítko** - tlačítko pro proklik na recept je vždy viditelné
 
 ### Version 1.0.2 (2026-01-15)
 
