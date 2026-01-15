@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Nastavení Top Recepty",
+        "description": "Nastavte integraci pro načítání receptů z toprecepty.cz",
+        "data": {
+          "update_interval": "Interval aktualizace (hodiny)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Nelze se připojit k serveru",
+      "invalid_interval": "Neplatný interval aktualizace",
+      "unknown": "Neočekávaná chyba"
+    },
+    "abort": {
+      "already_configured": "Tato integrace je již nakonfigurována"
+    }
+  }
+}
