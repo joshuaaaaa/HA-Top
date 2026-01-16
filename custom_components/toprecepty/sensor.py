@@ -206,7 +206,7 @@ class TopReceptyCoordinator:
 
     async def fetch_recipe_details(self, recipe_url: str) -> dict:
         """Fetch additional details from recipe page."""
-        details = {"prep_time": None, "servings": None, "rating": None, "difficulty": None}
+        details = {"prep_time": None, "servings": None, "rating": None, "difficulty": None, "description": None}
 
         try:
             session = async_get_clientsession(self.hass)
@@ -218,80 +218,87 @@ class TopReceptyCoordinator:
                 html = await response.text()
                 soup = BeautifulSoup(html, "html.parser")
 
-                # Try to find prep time
-                # Common patterns: "Čas přípravy:", "Příprava:", etc.
-                prep_time_keywords = ["čas přípravy", "příprava", "čas"]
-
-                for keyword in prep_time_keywords:
-                    # Try to find in text
-                    text_elements = soup.find_all(text=lambda t: t and keyword in t.lower())
-
-                    for elem in text_elements:
-                        # Look for time patterns (e.g., "30 min", "1 hod", "45 minut")
-                        import re
-                        time_pattern = r'(\d+)\s*(min|minut|hod|hodin)'
-
-                        # Check the element and its parent
-                        parent = elem.parent if hasattr(elem, 'parent') else None
-                        if parent:
-                            parent_text = parent.get_text()
-                            match = re.search(time_pattern, parent_text, re.IGNORECASE)
-                            if match:
-                                details["prep_time"] = match.group(0)
-                                break
-
-                    if details["prep_time"]:
-                        break
-
-                # Try to find servings/portions
-                servings_keywords = ["porce", "porcí", "porci"]
-                for keyword in servings_keywords:
-                    text_elements = soup.find_all(text=lambda t: t and keyword in t.lower())
-
-                    for elem in text_elements:
-                        import re
-                        servings_pattern = r'(\d+)\s*porc'
-
-                        parent = elem.parent if hasattr(elem, 'parent') else None
-                        if parent:
-                            parent_text = parent.get_text()
-                            match = re.search(servings_pattern, parent_text, re.IGNORECASE)
-                            if match:
-                                details["servings"] = int(match.group(1))
-                                break
-
-                    if details["servings"]:
-                        break
-
-                # Try to find rating (e.g., "4,7 (83x)")
-                rating_pattern = r'(\d+,\d+)\s*\((\d+)x?\)'
-                rating_matches = soup.find_all(text=lambda t: t and re.search(rating_pattern, str(t)))
-                if rating_matches:
-                    for match_text in rating_matches:
-                        match = re.search(rating_pattern, str(match_text))
-                        if match:
-                            rating_value = match.group(1)
-                            rating_count = match.group(2)
-                            details["rating"] = f"{rating_value} ({rating_count}x)"
+                # Try to find description
+                # Look for meta description first
+                meta_desc = soup.find("meta", {"name": "description"})
+                if meta_desc and meta_desc.get("content"):
+                    details["description"] = meta_desc.get("content").strip()
+                else:
+                    # Try to find first paragraph with substantial text
+                    paragraphs = soup.find_all("p")
+                    for p in paragraphs:
+                        text = p.get_text(strip=True)
+                        if len(text) > 50:  # Only consider substantial paragraphs
+                            details["description"] = text[:300]  # Limit to 300 chars
                             break
 
-                # Try to find difficulty
-                difficulty_keywords = ["snadný", "snadná", "střední", "středně", "náročný", "náročná", "obtížný", "obtížná"]
-                for keyword in difficulty_keywords:
-                    text_elements = soup.find_all(text=lambda t: t and keyword in t.lower())
-                    if text_elements:
-                        # Get the text and clean it
-                        difficulty_text = text_elements[0].strip()
-                        # Normalize to single word
-                        if "snadn" in difficulty_text.lower():
-                            details["difficulty"] = "Snadný"
-                        elif "střed" in difficulty_text.lower():
-                            details["difficulty"] = "Střední"
-                        elif "nároč" in difficulty_text.lower() or "obtíž" in difficulty_text.lower():
-                            details["difficulty"] = "Náročný"
+                # Get the entire page text for broader matching
+                page_text = soup.get_text()
+
+                # Try to find prep time - search in entire page
+                time_pattern = r'(\d+)\s*(min|minut|hod|hodin)'
+                time_matches = re.finditer(time_pattern, page_text, re.IGNORECASE)
+                for match in time_matches:
+                    # Get context around the match
+                    start = max(0, match.start() - 20)
+                    end = min(len(page_text), match.end() + 20)
+                    context = page_text[start:end].lower()
+
+                    # Check if it's related to prep time (not cooking time or other times)
+                    if any(kw in context for kw in ["čas", "příprav", "celkem"]):
+                        details["prep_time"] = match.group(0)
+                        _LOGGER.debug(f"Found prep_time: {details['prep_time']} in context: {context}")
                         break
 
-                _LOGGER.debug(f"Fetched details for recipe: {details}")
+                # Try to find servings - search in entire page
+                servings_pattern = r'(\d+)\s*porc'
+                servings_matches = re.finditer(servings_pattern, page_text, re.IGNORECASE)
+                for match in servings_matches:
+                    details["servings"] = int(match.group(1))
+                    _LOGGER.debug(f"Found servings: {details['servings']}")
+                    break
+
+                # Try to find rating - more flexible pattern
+                # Patterns: "4,7 (84x)", "4.7 (84x)", "4,7(84x)"
+                rating_patterns = [
+                    r'(\d+[,\.]\d+)\s*\((\d+)x?\)',
+                    r'(\d+[,\.]\d+)\s*★',
+                ]
+
+                for pattern in rating_patterns:
+                    rating_matches = re.finditer(pattern, page_text, re.IGNORECASE)
+                    for match in rating_matches:
+                        rating_value = match.group(1).replace('.', ',')
+                        # Try to get count if available
+                        rating_count_match = re.search(r'\((\d+)x?\)', page_text[match.start():match.start()+50])
+                        if rating_count_match:
+                            details["rating"] = f"{rating_value} ({rating_count_match.group(1)}x)"
+                        else:
+                            details["rating"] = rating_value
+                        _LOGGER.debug(f"Found rating: {details['rating']}")
+                        break
+
+                    if details["rating"]:
+                        break
+
+                # Try to find difficulty - search in entire page
+                difficulty_keywords = {
+                    "snadn": "Snadný",
+                    "střed": "Střední",
+                    "nároč": "Náročný",
+                    "obtíž": "Náročný"
+                }
+
+                for keyword, value in difficulty_keywords.items():
+                    if keyword in page_text.lower():
+                        # Find the exact word
+                        diff_match = re.search(rf'\b\w*{keyword}\w*\b', page_text, re.IGNORECASE)
+                        if diff_match:
+                            details["difficulty"] = value
+                            _LOGGER.debug(f"Found difficulty: {details['difficulty']} (matched: {diff_match.group(0)})")
+                            break
+
+                _LOGGER.info(f"Fetched details for recipe: {details}")
 
         except Exception as err:
             _LOGGER.error(f"Error fetching recipe details from {recipe_url}: {err}")
@@ -418,7 +425,7 @@ class DailyRecipeSensor(SensorEntity):
                 else:
                     self._local_image_path = None
 
-                # Fetch recipe details (prep time, servings, rating, difficulty)
+                # Fetch recipe details (prep time, servings, rating, difficulty, description)
                 recipe_url = recipe.get("url")
                 if recipe_url and not recipe.get("prep_time"):
                     details = await self._coordinator.fetch_recipe_details(recipe_url)
@@ -426,6 +433,9 @@ class DailyRecipeSensor(SensorEntity):
                     recipe["servings"] = details.get("servings")
                     recipe["rating"] = details.get("rating")
                     recipe["difficulty"] = details.get("difficulty")
+                    # Update description if we got a better one from detail page
+                    if details.get("description"):
+                        recipe["description"] = details.get("description")
                     # Save updated recipe data
                     await self._coordinator._save_recipes()
-                    _LOGGER.info(f"Fetched recipe details: prep_time={details.get('prep_time')}, servings={details.get('servings')}, rating={details.get('rating')}, difficulty={details.get('difficulty')}")
+                    _LOGGER.info(f"Fetched recipe details: prep_time={details.get('prep_time')}, servings={details.get('servings')}, rating={details.get('rating')}, difficulty={details.get('difficulty')}, description_length={len(details.get('description', ''))}")

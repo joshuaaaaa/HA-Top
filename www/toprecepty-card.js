@@ -207,11 +207,13 @@ class TopReceptyCard extends HTMLElement {
     // Update description
     const descElement = this.querySelector('.recipe-description');
     if (descElement) {
-      if (attributes.description) {
+      if (attributes.description && attributes.description !== 'None' && attributes.description !== '') {
         descElement.textContent = attributes.description;
         descElement.style.display = 'block';
+        console.log('TopRecepty: Showing description:', attributes.description.substring(0, 50) + '...');
       } else {
         descElement.style.display = 'none';
+        console.log('TopRecepty: No description available');
       }
     }
 
@@ -219,18 +221,21 @@ class TopReceptyCard extends HTMLElement {
     const prepTimeElement = this.querySelector('.prep-time');
     if (prepTimeElement) {
       prepTimeElement.textContent = attributes.prep_time || 'N/A';
+      console.log('TopRecepty: prep_time =', attributes.prep_time);
     }
 
     // Update rating
     const ratingElement = this.querySelector('.rating');
     if (ratingElement) {
       ratingElement.textContent = attributes.rating || '?';
+      console.log('TopRecepty: rating =', attributes.rating);
     }
 
     // Update difficulty
     const difficultyElement = this.querySelector('.difficulty');
     if (difficultyElement) {
       difficultyElement.textContent = attributes.difficulty || '?';
+      console.log('TopRecepty: difficulty =', attributes.difficulty);
     }
 
     // Update link - always show button if URL exists
