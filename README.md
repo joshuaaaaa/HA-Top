@@ -213,6 +213,15 @@ Interval se nastavuje při přidání integrace, ale můžete ho změnit:
 
 ## 📝 Changelog
 
+### Version 1.0.5 (2026-01-16)
+
+- 🔧 **Vylepšené parsování** - robustnější načítání dat z toprecepty.cz
+- ⏱️ **Opraveno** - čas přípravy se nyní správně načítá z detailu receptu
+- ⭐ **Opraveno** - hodnocení se správně načítá (např. "4,7 (84x)")
+- 📊 **Opraveno** - obtížnost se správně detekuje (Snadný/Střední/Náročný)
+- 📝 **Popis receptu** - načítání popisu z meta tagů nebo textu stránky
+- 🐛 **Debug výpisy** - přidány konzolové výpisy pro snadné debugování
+
 ### Version 1.0.4 (2026-01-15)
 
 - ⭐ **Hodnocení receptu** - automatické načítání hodnocení s počtem hlasů (např. "4,7 (83x)")
