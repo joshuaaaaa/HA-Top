@@ -195,7 +195,7 @@ class TopReceptyCoordinator:
             async with session.get(image_url, timeout=10) as response:
                 if response.status == 200:
                     content = await response.read()
-                    filepath.write_bytes(content)
+                    await self.hass.async_add_executor_job(filepath.write_bytes, content)
                     # Return path accessible from Lovelace
                     return f"/local/toprecepty/{self.daily_image_filename}"
 
@@ -313,8 +313,11 @@ class TopReceptyCoordinator:
                 "last_update": self.last_update.isoformat() if self.last_update else None,
             }
 
-            with open(self.data_file, "w", encoding="utf-8") as file:
-                json.dump(data, file, ensure_ascii=False, indent=2)
+            def write_json():
+                with open(self.data_file, "w", encoding="utf-8") as file:
+                    json.dump(data, file, ensure_ascii=False, indent=2)
+
+            await self.hass.async_add_executor_job(write_json)
 
             _LOGGER.debug(f"Saved {len(self.recipes)} recipes to {self.data_file}")
 
@@ -328,8 +331,11 @@ class TopReceptyCoordinator:
                 _LOGGER.warning("No cached recipes found")
                 return
 
-            with open(self.data_file, "r", encoding="utf-8") as file:
-                data = json.load(file)
+            def read_json():
+                with open(self.data_file, "r", encoding="utf-8") as file:
+                    return json.load(file)
+
+            data = await self.hass.async_add_executor_job(read_json)
 
             self.recipes = data.get("recipes", [])
             last_update_str = data.get("last_update")
