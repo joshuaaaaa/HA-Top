@@ -86,7 +86,7 @@ Integrace vytvoří senzor `sensor.denni_recept` s následujícími atributy:
 | `title` | Název receptu |
 | `url` | Odkaz na celý recept na toprecepty.cz |
 | `image_url` | URL obrázku receptu |
-| `local_image` | Cesta k lokálně uloženému obrázku (`/local/toprecepty/daily_recipe.jpg`) |
+| `local_image` | Cesta k lokálně uloženému obrázku (`/local/toprecepty/daily_recipe.jpg?v=<recipe_id>`) |
 | `description` | Krátký popis receptu |
 | `prep_time` | Čas přípravy (např. "30 min", "1 hod") |
 | `servings` | Počet porcí |
@@ -148,15 +148,14 @@ HA-Top/
 │       ├── config_flow.py      # Konfigurace přes UI
 │       ├── sensor.py           # Implementace senzoru
 │       ├── strings.json        # Překlady pro UI
-│       ├── translations/       # Lokalizace
-│       │   ├── cs.json
-│       │   └── en.json
-│       └── data/               # Automaticky vytvořená složka
-│           └── toprecepty_recipes.json    # Uložené recepty
+│       └── translations/       # Lokalizace
+│           ├── cs.json
+│           └── en.json
 ├── www/
 │   ├── toprecepty-card.js      # Custom Lovelace karta
 │   └── toprecepty/             # Automaticky vytvořená složka
 │       └── daily_recipe.jpg    # Obrázek denního receptu (přepisuje se)
+├── .storage/toprecepty_data    # Uložené recepty (spravuje Home Assistant)
 ├── hacs.json                   # HACS konfigurace
 ├── info.md                     # Informace pro HACS
 └── README.md                   # Tento soubor
@@ -207,11 +206,28 @@ Interval se nastavuje při přidání integrace, ale můžete ho změnit:
 
 ### Obrázky se nezobrazují
 
-1. Zkontrolujte, že složka `custom_components/toprecepty/data/toprecepty_images` existuje
+1. Zkontrolujte, že složka `www/toprecepty` existuje a obsahuje `daily_recipe.jpg`
 2. Ověřte oprávnění k zápisu
-3. Zkuste manuálně aktualizovat senzor
+3. Zkuste manuálně aktualizovat senzor (`homeassistant.update_entity`)
 
 ## 📝 Changelog
+
+### Version 1.0.6 (2026-10-05)
+
+- 🖼️ **Opraveno** - fotka nyní vždy odpovídá receptu:
+  - obrázek se bere přímo ze stránky receptu (`og:image`), ne z výpisu
+  - při parsování výpisu se obrázek a název hledají jen v bloku jednoho receptu
+  - podpora lazy-load obrázků (`data-src`, `srcset`) místo zástupných obrázků
+  - `local_image` obsahuje `?v=<recipe_id>`, prohlížeč tak nezobrazí včerejší fotku z cache
+- ⚡ **Nižší zátěž systému**:
+  - senzor se již nedotazuje každých 30 s - aktualizuje se jen po startu a jednou denně po půlnoci
+  - start Home Assistantu nečeká na stažení dat z webu
+  - parsování HTML běží mimo event loop
+  - denní recept (vč. detailů a obrázku) se ukládá - po restartu se nic znovu nestahuje
+  - data se ukládají přes `.storage` s odloženým zápisem
+  - karta se překresluje jen při změně senzoru, odstraněny konzolové výpisy
+- 🔒 Stabilní ID receptu (stejné i po restartu), denní recept se během dne nemění
+- 🛠️ Opraven editor karty
 
 ### Version 1.0.5 (2026-01-16)
 
