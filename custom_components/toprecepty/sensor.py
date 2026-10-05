@@ -1,34 +1,48 @@
 """Sensor platform for Top Recepty integration."""
-import json
+from __future__ import annotations
+
+import hashlib
 import logging
-import os
 import random
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .const import (
     ALL_RECIPES_URL,
     BASE_URL,
     CONF_UPDATE_INTERVAL,
-    DATA_FILE,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
-    IMAGES_DIR,
+    MAX_IMAGE_SIZE,
+    MAX_RECIPES,
     SENSOR_ICON,
     SENSOR_NAME,
+    STORAGE_KEY,
+    STORAGE_VERSION,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
+IMAGE_TIMEOUT = aiohttp.ClientTimeout(total=20)
+DAILY_IMAGE_FILENAME = "daily_recipe.jpg"
+
+# Attributes holding the real image URL on lazy-loaded <img> tags
+IMG_SRC_ATTRS = ("data-src", "data-lazy-src", "data-original", "data-srcset", "srcset", "src")
 
 
 async def async_setup_entry(
@@ -42,406 +56,469 @@ async def async_setup_entry(
     )
 
     coordinator = TopReceptyCoordinator(hass, update_interval)
-    await coordinator.async_fetch_recipes()
+    # Only loads the local cache - network requests run in the background
+    # so they never delay Home Assistant startup.
+    await coordinator.async_load()
 
-    async_add_entities([DailyRecipeSensor(coordinator)], True)
+    async_add_entities([DailyRecipeSensor(coordinator)])
+
+
+# --------------------------------------------------------------------------
+# HTML parsing helpers (CPU bound, executed in the executor thread pool)
+# --------------------------------------------------------------------------
+
+
+def _recipe_id(url: str) -> int:
+    """Return a stable id for a recipe URL (same across restarts)."""
+    return int(hashlib.md5(url.encode("utf-8")).hexdigest()[:10], 16)
+
+
+def _normalize_url(href: str | None) -> str | None:
+    """Convert a relative href to an absolute URL without fragment."""
+    if not href:
+        return None
+    href = href.strip()
+    if not href or href.startswith(("#", "javascript:", "mailto:", "data:")):
+        return None
+    return urljoin(BASE_URL + "/", href).split("#", 1)[0]
+
+
+def _is_recipe_url(url: str | None) -> bool:
+    """Return True if URL points to a recipe detail page."""
+    if not url:
+        return False
+    parsed = urlparse(url)
+    if parsed.netloc and "toprecepty.cz" not in parsed.netloc:
+        return False
+    path = parsed.path.lower()
+    # Detail pages look like /recept/12345-nazev-receptu/
+    if re.search(r"/recept/[^/]+", path):
+        return True
+    # Fallback for other URL formats containing recipe id
+    return "recept" in path and bool(re.search(r"\d", path))
+
+
+def _img_url(img) -> str | None:
+    """Return the real image URL of an <img> (handles lazy loading)."""
+    if img is None:
+        return None
+    for attr in IMG_SRC_ATTRS:
+        value = img.get(attr)
+        if not value:
+            continue
+        # srcset: "url1 300w, url2 600w" -> take the last (largest) candidate
+        if "srcset" in attr:
+            candidates = [c.strip().split(" ")[0] for c in value.split(",") if c.strip()]
+            value = candidates[-1] if candidates else None
+        url = _normalize_url(value)
+        if url and not url.lower().endswith((".svg", ".gif")):
+            return url
+    return None
+
+
+def _find_container(link, url: str):
+    """Return the biggest ancestor of link that contains only this recipe.
+
+    This guarantees the image and title found inside the container belong
+    to the same recipe as the link (previously the first image of a
+    container holding several recipes could be used).
+    """
+    node = link
+    for _ in range(6):
+        parent = node.parent
+        if parent is None or parent.name in ("body", "html", "[document]"):
+            break
+        other = False
+        for a in parent.find_all("a", href=True):
+            other_url = _normalize_url(a["href"])
+            if _is_recipe_url(other_url) and other_url != url:
+                other = True
+                break
+        if other:
+            break
+        node = parent
+    return node
+
+
+def parse_listing(html: str) -> list[dict]:
+    """Parse the listing page into a list of recipes."""
+    soup = BeautifulSoup(html, "html.parser")
+    recipes: list[dict] = []
+    seen: set[str] = set()
+
+    for link in soup.find_all("a", href=True):
+        url = _normalize_url(link["href"])
+        if not _is_recipe_url(url) or url in seen:
+            continue
+        seen.add(url)
+
+        container = _find_container(link, url)
+
+        title = None
+        heading = container.find(["h2", "h3", "h4"])
+        if heading:
+            title = heading.get_text(" ", strip=True)
+        if not title:
+            texts = [
+                a.get_text(" ", strip=True)
+                for a in container.find_all("a", href=True)
+                if _normalize_url(a["href"]) == url
+            ]
+            texts = [t for t in texts if t]
+            if texts:
+                title = max(texts, key=len)
+        if not title:
+            title = link.get("title")
+        img = container.find("img")
+        if not title and img is not None:
+            title = img.get("alt")
+        if not title:
+            continue
+
+        description = ""
+        desc = container.find("p")
+        if desc:
+            description = desc.get_text(" ", strip=True)
+
+        recipes.append(
+            {
+                "id": _recipe_id(url),
+                "title": title.strip(),
+                "url": url,
+                "image_url": _img_url(img),
+                "description": description,
+            }
+        )
+        if len(recipes) >= MAX_RECIPES:
+            break
+
+    return recipes
+
+
+def parse_detail(html: str) -> dict:
+    """Parse a recipe detail page."""
+    details = {
+        "image_url": None,
+        "description": None,
+        "prep_time": None,
+        "servings": None,
+        "rating": None,
+        "difficulty": None,
+    }
+    soup = BeautifulSoup(html, "html.parser")
+
+    def meta(*keys: str) -> str | None:
+        for key in keys:
+            tag = soup.find("meta", attrs={"property": key}) or soup.find(
+                "meta", attrs={"name": key}
+            )
+            if tag and tag.get("content"):
+                return tag["content"].strip()
+        return None
+
+    # The image of the recipe itself - this is the authoritative source,
+    # so the photo always matches the recipe.
+    details["image_url"] = _normalize_url(meta("og:image", "twitter:image"))
+    if not details["image_url"]:
+        details["image_url"] = _img_url(soup.find("img", itemprop="image"))
+
+    details["description"] = meta("description", "og:description")
+    if not details["description"]:
+        for p in soup.find_all("p"):
+            text = p.get_text(" ", strip=True)
+            if len(text) > 50:
+                details["description"] = text[:300]
+                break
+
+    page_text = soup.get_text(" ")
+    page_text_lower = page_text.lower()
+
+    for match in re.finditer(r"(\d+)\s*(min|minut|hod|hodin)", page_text, re.IGNORECASE):
+        context = page_text_lower[max(0, match.start() - 20) : match.end() + 20]
+        if any(kw in context for kw in ("čas", "příprav", "celkem")):
+            details["prep_time"] = match.group(0)
+            break
+
+    servings = re.search(r"(\d+)\s*porc", page_text, re.IGNORECASE)
+    if servings:
+        details["servings"] = int(servings.group(1))
+
+    rating = re.search(r"(\d+[,\.]\d+)\s*\((\d+)x?\)", page_text)
+    if rating:
+        details["rating"] = f"{rating.group(1).replace('.', ',')} ({rating.group(2)}x)"
+    else:
+        rating = re.search(r"(\d+[,\.]\d+)\s*★", page_text)
+        if rating:
+            details["rating"] = rating.group(1).replace(".", ",")
+
+    for keyword, value in (
+        ("snadn", "Snadný"),
+        ("střed", "Střední"),
+        ("nároč", "Náročný"),
+        ("obtíž", "Náročný"),
+    ):
+        if keyword in page_text_lower:
+            details["difficulty"] = value
+            break
+
+    return details
+
+
+# --------------------------------------------------------------------------
+# Coordinator
+# --------------------------------------------------------------------------
 
 
 class TopReceptyCoordinator:
-    """Class to manage fetching Top Recepty data."""
+    """Manage fetching and caching of Top Recepty data."""
 
     def __init__(self, hass: HomeAssistant, update_interval: int) -> None:
         """Initialize."""
         self.hass = hass
         self.update_interval = timedelta(hours=update_interval)
-        self.recipes = []
-        self.data_dir = Path(hass.config.path("custom_components", DOMAIN, "data"))
-        self.data_file = self.data_dir / DATA_FILE
-        # Store daily recipe image in www folder for Lovelace access
+        self.recipes: list[dict] = []
+        self.last_update: datetime | None = None
+        # Daily recipe incl. details, fixed for the whole day
+        self.daily: dict | None = None
+        self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self.www_dir = Path(hass.config.path("www", "toprecepty"))
-        self.daily_image_filename = "daily_recipe.jpg"
-        self.last_update = None
+        self.image_path = self.www_dir / DAILY_IMAGE_FILENAME
 
-        # Create directories
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.www_dir.mkdir(parents=True, exist_ok=True)
+    @property
+    def _session(self) -> aiohttp.ClientSession:
+        return async_get_clientsession(self.hass)
 
-    async def async_fetch_recipes(self) -> None:
-        """Fetch recipes from toprecepty.cz."""
+    async def async_load(self) -> None:
+        """Load cached data (no network)."""
+        await self.hass.async_add_executor_job(
+            lambda: self.www_dir.mkdir(parents=True, exist_ok=True)
+        )
         try:
-            session = async_get_clientsession(self.hass)
+            data = await self._store.async_load()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Error loading cached recipes: %s", err)
+            data = None
+        if not data:
+            return
+        self.recipes = data.get("recipes", [])
+        self.daily = data.get("daily")
+        if data.get("last_update"):
+            try:
+                self.last_update = datetime.fromisoformat(data["last_update"])
+            except ValueError:
+                self.last_update = None
+        _LOGGER.debug("Loaded %s recipes from cache", len(self.recipes))
 
-            # Fetch the main page with all recipes
-            async with session.get(ALL_RECIPES_URL, timeout=30) as response:
-                if response.status != 200:
-                    _LOGGER.error(
-                        "Failed to fetch recipes: HTTP %s", response.status
-                    )
-                    return
-
-                html = await response.text()
-
-            # Parse HTML
-            soup = BeautifulSoup(html, "html.parser")
-            recipes_list = []
-
-            # Find all recipe items
-            # Structure may vary, this is a common pattern for recipe listings
-            recipe_items = soup.find_all("div", class_=lambda x: x and "recept" in x.lower())
-
-            if not recipe_items:
-                # Try alternative selectors
-                recipe_items = soup.find_all("article")
-
-            if not recipe_items:
-                # Try to find links with recipe patterns
-                recipe_items = soup.find_all("a", href=lambda x: x and "recept" in x)
-
-            _LOGGER.info(f"Found {len(recipe_items)} recipe items")
-
-            for item in recipe_items[:50]:  # Limit to 50 recipes
-                try:
-                    recipe_data = await self._parse_recipe_item(item, session)
-                    if recipe_data:
-                        recipes_list.append(recipe_data)
-                except Exception as err:
-                    _LOGGER.error(f"Error parsing recipe item: {err}")
-                    continue
-
-            if recipes_list:
-                self.recipes = recipes_list
-                self.last_update = datetime.now()
-                await self._save_recipes()
-                _LOGGER.info(f"Successfully fetched {len(recipes_list)} recipes")
-            else:
-                _LOGGER.warning("No recipes found, loading from cache")
-                await self._load_recipes()
-
-        except Exception as err:
-            _LOGGER.error(f"Error fetching recipes: {err}")
-            # Try to load from cache
-            await self._load_recipes()
-
-    async def _parse_recipe_item(self, item, session) -> dict | None:
-        """Parse a single recipe item."""
-        try:
-            # Try to find recipe link
-            link = None
-            if item.name == "a":
-                link = item
-            else:
-                link = item.find("a")
-
-            if not link or not link.get("href"):
-                return None
-
-            url = link.get("href")
-            if not url.startswith("http"):
-                url = BASE_URL + url if url.startswith("/") else f"{BASE_URL}/{url}"
-
-            # Find recipe title
-            title = None
-            title_elem = item.find(["h2", "h3", "h4"])
-            if title_elem:
-                title = title_elem.get_text(strip=True)
-            elif link:
-                title = link.get_text(strip=True)
-
-            if not title:
-                return None
-
-            # Find image
-            image_url = None
-            img = item.find("img")
-            if img:
-                image_url = img.get("src") or img.get("data-src")
-                if image_url and not image_url.startswith("http"):
-                    image_url = BASE_URL + image_url if image_url.startswith("/") else f"{BASE_URL}/{image_url}"
-
-            # Try to get description
-            description = ""
-            desc_elem = item.find("p")
-            if desc_elem:
-                description = desc_elem.get_text(strip=True)
-
-            recipe = {
-                "id": abs(hash(url)) % (10 ** 10),
-                "title": title,
-                "url": url,
-                "image_url": image_url,
-                "description": description,
-                "prep_time": None,  # Will be fetched when recipe becomes daily recipe
-                "servings": None,
-                "rating": None,
-                "difficulty": None,
-                "fetched_at": datetime.now().isoformat(),
-            }
-
-            return recipe
-
-        except Exception as err:
-            _LOGGER.error(f"Error parsing recipe item: {err}")
-            return None
-
-    async def download_daily_recipe_image(self, image_url: str) -> str | None:
-        """Download daily recipe image and save as daily_recipe.jpg."""
-        if not image_url:
-            return None
-
-        try:
-            session = async_get_clientsession(self.hass)
-            filepath = self.www_dir / self.daily_image_filename
-
-            async with session.get(image_url, timeout=10) as response:
-                if response.status == 200:
-                    content = await response.read()
-                    await self.hass.async_add_executor_job(filepath.write_bytes, content)
-                    # Return path accessible from Lovelace
-                    return f"/local/toprecepty/{self.daily_image_filename}"
-
-        except Exception as err:
-            _LOGGER.error(f"Error downloading daily recipe image {image_url}: {err}")
-
-        return None
-
-    async def fetch_recipe_details(self, recipe_url: str) -> dict:
-        """Fetch additional details from recipe page."""
-        details = {"prep_time": None, "servings": None, "rating": None, "difficulty": None, "description": None}
-
-        try:
-            session = async_get_clientsession(self.hass)
-
-            async with session.get(recipe_url, timeout=15) as response:
-                if response.status != 200:
-                    return details
-
-                html = await response.text()
-                soup = BeautifulSoup(html, "html.parser")
-
-                # Try to find description
-                # Look for meta description first
-                meta_desc = soup.find("meta", {"name": "description"})
-                if meta_desc and meta_desc.get("content"):
-                    details["description"] = meta_desc.get("content").strip()
-                else:
-                    # Try to find first paragraph with substantial text
-                    paragraphs = soup.find_all("p")
-                    for p in paragraphs:
-                        text = p.get_text(strip=True)
-                        if len(text) > 50:  # Only consider substantial paragraphs
-                            details["description"] = text[:300]  # Limit to 300 chars
-                            break
-
-                # Get the entire page text for broader matching
-                page_text = soup.get_text()
-
-                # Try to find prep time - search in entire page
-                time_pattern = r'(\d+)\s*(min|minut|hod|hodin)'
-                time_matches = re.finditer(time_pattern, page_text, re.IGNORECASE)
-                for match in time_matches:
-                    # Get context around the match
-                    start = max(0, match.start() - 20)
-                    end = min(len(page_text), match.end() + 20)
-                    context = page_text[start:end].lower()
-
-                    # Check if it's related to prep time (not cooking time or other times)
-                    if any(kw in context for kw in ["čas", "příprav", "celkem"]):
-                        details["prep_time"] = match.group(0)
-                        _LOGGER.debug(f"Found prep_time: {details['prep_time']} in context: {context}")
-                        break
-
-                # Try to find servings - search in entire page
-                servings_pattern = r'(\d+)\s*porc'
-                servings_matches = re.finditer(servings_pattern, page_text, re.IGNORECASE)
-                for match in servings_matches:
-                    details["servings"] = int(match.group(1))
-                    _LOGGER.debug(f"Found servings: {details['servings']}")
-                    break
-
-                # Try to find rating - more flexible pattern
-                # Patterns: "4,7 (84x)", "4.7 (84x)", "4,7(84x)"
-                rating_patterns = [
-                    r'(\d+[,\.]\d+)\s*\((\d+)x?\)',
-                    r'(\d+[,\.]\d+)\s*★',
-                ]
-
-                for pattern in rating_patterns:
-                    rating_matches = re.finditer(pattern, page_text, re.IGNORECASE)
-                    for match in rating_matches:
-                        rating_value = match.group(1).replace('.', ',')
-                        # Try to get count if available
-                        rating_count_match = re.search(r'\((\d+)x?\)', page_text[match.start():match.start()+50])
-                        if rating_count_match:
-                            details["rating"] = f"{rating_value} ({rating_count_match.group(1)}x)"
-                        else:
-                            details["rating"] = rating_value
-                        _LOGGER.debug(f"Found rating: {details['rating']}")
-                        break
-
-                    if details["rating"]:
-                        break
-
-                # Try to find difficulty - search in entire page
-                difficulty_keywords = {
-                    "snadn": "Snadný",
-                    "střed": "Střední",
-                    "nároč": "Náročný",
-                    "obtíž": "Náročný"
-                }
-
-                for keyword, value in difficulty_keywords.items():
-                    if keyword in page_text.lower():
-                        # Find the exact word
-                        diff_match = re.search(rf'\b\w*{keyword}\w*\b', page_text, re.IGNORECASE)
-                        if diff_match:
-                            details["difficulty"] = value
-                            _LOGGER.debug(f"Found difficulty: {details['difficulty']} (matched: {diff_match.group(0)})")
-                            break
-
-                _LOGGER.info(f"Fetched details for recipe: {details}")
-
-        except Exception as err:
-            _LOGGER.error(f"Error fetching recipe details from {recipe_url}: {err}")
-
-        return details
-
-    async def _save_recipes(self) -> None:
-        """Save recipes to JSON file."""
-        try:
-            data = {
+    @callback
+    def _async_schedule_save(self) -> None:
+        """Save data (debounced, written in executor by Store)."""
+        self._store.async_delay_save(
+            lambda: {
                 "recipes": self.recipes,
+                "daily": self.daily,
                 "last_update": self.last_update.isoformat() if self.last_update else None,
-            }
+            },
+            5,
+        )
 
-            def write_json():
-                with open(self.data_file, "w", encoding="utf-8") as file:
-                    json.dump(data, file, ensure_ascii=False, indent=2)
-
-            await self.hass.async_add_executor_job(write_json)
-
-            _LOGGER.debug(f"Saved {len(self.recipes)} recipes to {self.data_file}")
-
-        except Exception as err:
-            _LOGGER.error(f"Error saving recipes: {err}")
-
-    async def _load_recipes(self) -> None:
-        """Load recipes from JSON file."""
+    async def _async_get_text(self, url: str) -> str | None:
         try:
-            if not self.data_file.exists():
-                _LOGGER.warning("No cached recipes found")
-                return
+            async with self._session.get(url, timeout=REQUEST_TIMEOUT) as response:
+                if response.status != 200:
+                    _LOGGER.warning("Failed to fetch %s: HTTP %s", url, response.status)
+                    return None
+                return await response.text()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.warning("Error fetching %s: %s", url, err)
+            return None
 
-            def read_json():
-                with open(self.data_file, "r", encoding="utf-8") as file:
-                    return json.load(file)
+    def _list_is_stale(self) -> bool:
+        return (
+            not self.recipes
+            or self.last_update is None
+            or dt_util.utcnow() - _as_utc(self.last_update) > self.update_interval
+        )
 
-            data = await self.hass.async_add_executor_job(read_json)
+    async def async_refresh_list(self, force: bool = False) -> None:
+        """Refresh the recipe list from the web if it is stale."""
+        if not force and not self._list_is_stale():
+            return
+        html = await self._async_get_text(ALL_RECIPES_URL)
+        if not html:
+            return
+        recipes = await self.hass.async_add_executor_job(parse_listing, html)
+        if not recipes:
+            _LOGGER.warning("No recipes found on %s, keeping cached list", ALL_RECIPES_URL)
+            return
+        self.recipes = recipes
+        self.last_update = dt_util.utcnow()
+        self._async_schedule_save()
+        _LOGGER.debug("Fetched %s recipes", len(recipes))
 
-            self.recipes = data.get("recipes", [])
-            last_update_str = data.get("last_update")
-            if last_update_str:
-                self.last_update = datetime.fromisoformat(last_update_str)
-
-            _LOGGER.info(f"Loaded {len(self.recipes)} recipes from cache")
-
-        except Exception as err:
-            _LOGGER.error(f"Error loading recipes: {err}")
-            self.recipes = []
-
-    def get_daily_recipe(self) -> dict | None:
-        """Get the daily recipe based on current date."""
+    def _pick_recipe(self, day: date) -> dict | None:
         if not self.recipes:
             return None
+        # Local Random instance - does not touch the global random state
+        rng = random.Random(int(day.strftime("%Y%m%d")))
+        candidates = self.recipes
+        if self.daily and len(candidates) > 1:
+            candidates = [r for r in candidates if r.get("url") != self.daily.get("url")]
+        return rng.choice(candidates)
 
-        # Use date as seed for consistent daily recipe
-        today = datetime.now().date()
-        seed = int(today.strftime("%Y%m%d"))
-        random.seed(seed)
+    async def async_ensure_daily(self) -> bool:
+        """Make sure today's recipe is selected and complete.
 
-        return random.choice(self.recipes)
+        Returns True if the daily recipe changed.
+        """
+        today = dt_util.now().date()
+        if (
+            self.daily
+            and self.daily.get("date") == today.isoformat()
+            and self.daily.get("details_fetched")
+            and await self._async_image_ok()
+        ):
+            return False
+
+        if not self.daily or self.daily.get("date") != today.isoformat():
+            await self.async_refresh_list()
+            recipe = self._pick_recipe(today)
+            if recipe is None:
+                return False
+            self.daily = {**recipe, "date": today.isoformat(), "details_fetched": False}
+
+        daily = self.daily
+
+        if not daily.get("details_fetched"):
+            html = await self._async_get_text(daily["url"])
+            if html:
+                details = await self.hass.async_add_executor_job(parse_detail, html)
+                for key in ("prep_time", "servings", "rating", "difficulty", "description"):
+                    if details.get(key):
+                        daily[key] = details[key]
+                # Image from the recipe page itself always matches the recipe
+                if details.get("image_url"):
+                    daily["image_url"] = details["image_url"]
+                daily["details_fetched"] = True
+
+        daily["local_image"] = await self._async_download_image(
+            daily.get("image_url"), daily["id"]
+        )
+
+        self._async_schedule_save()
+        return True
+
+    async def _async_image_ok(self) -> bool:
+        """Check the cached image belongs to the current daily recipe."""
+        if not self.daily:
+            return False
+        if not self.daily.get("image_url"):
+            return True
+        if not self.daily.get("local_image"):
+            return False
+        return await self.hass.async_add_executor_job(self.image_path.exists)
+
+    async def _async_download_image(self, image_url: str | None, recipe_id: int) -> str | None:
+        """Download image of the daily recipe, return its /local/ URL."""
+        if not image_url:
+            await self.hass.async_add_executor_job(
+                lambda: self.image_path.unlink(missing_ok=True)
+            )
+            return None
+        try:
+            async with self._session.get(image_url, timeout=IMAGE_TIMEOUT) as response:
+                if response.status != 200:
+                    _LOGGER.warning("Image download failed (%s): HTTP %s", image_url, response.status)
+                    return None
+                if not response.headers.get("Content-Type", "image/").startswith("image/"):
+                    _LOGGER.warning("Image URL %s did not return an image", image_url)
+                    return None
+                if (response.content_length or 0) > MAX_IMAGE_SIZE:
+                    _LOGGER.warning("Image %s is too large, skipping", image_url)
+                    return None
+                content = await response.read()
+                if len(content) > MAX_IMAGE_SIZE:
+                    _LOGGER.warning("Image %s is too large, skipping", image_url)
+                    return None
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.warning("Error downloading image %s: %s", image_url, err)
+            return None
+
+        await self.hass.async_add_executor_job(self.image_path.write_bytes, content)
+        # Version query parameter prevents the browser from showing
+        # yesterday's cached photo with today's recipe.
+        return f"/local/toprecepty/{DAILY_IMAGE_FILENAME}?v={recipe_id}"
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Return datetime as aware UTC (old caches stored naive local time)."""
+    if value.tzinfo is None:
+        return dt_util.as_utc(value.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE))
+    return dt_util.as_utc(value)
+
+
+# --------------------------------------------------------------------------
+# Sensor
+# --------------------------------------------------------------------------
 
 
 class DailyRecipeSensor(SensorEntity):
     """Representation of a Daily Recipe Sensor."""
 
+    # No polling - updated once a day (just after midnight) and on startup
+    _attr_should_poll = False
+    _attr_name = SENSOR_NAME
+    _attr_unique_id = f"{DOMAIN}_daily_recipe"
+    _attr_icon = SENSOR_ICON
+
     def __init__(self, coordinator: TopReceptyCoordinator) -> None:
         """Initialize the sensor."""
         self._coordinator = coordinator
-        self._attr_name = SENSOR_NAME
-        self._attr_unique_id = f"{DOMAIN}_daily_recipe"
-        self._attr_icon = SENSOR_ICON
-        self._current_recipe_id = None
-        self._local_image_path = None
+        self._update_from_daily()
 
-    @property
-    def state(self) -> str | None:
-        """Return the state of the sensor."""
-        recipe = self._coordinator.get_daily_recipe()
-        if recipe:
-            return recipe.get("title")
-        return "Žádný recept"
+    async def async_added_to_hass(self) -> None:
+        """Schedule updates."""
+        self.async_on_remove(
+            async_track_time_change(
+                self.hass, self._async_midnight, hour=0, minute=1, second=0
+            )
+        )
+        # Fetch in the background so startup is not delayed
+        self.hass.async_create_task(self._async_refresh())
 
-    @property
-    def extra_state_attributes(self) -> dict:
-        """Return the state attributes."""
-        recipe = self._coordinator.get_daily_recipe()
+    async def _async_midnight(self, _now) -> None:
+        await self._async_refresh()
+
+    async def _async_refresh(self) -> None:
+        await self.async_update()
+        self.async_write_ha_state()
+
+    async def async_update(self) -> None:
+        """Update the sensor (also called by homeassistant.update_entity)."""
+        try:
+            await self._coordinator.async_ensure_daily()
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Error updating daily recipe")
+        self._update_from_daily()
+
+    def _update_from_daily(self) -> None:
+        recipe = self._coordinator.daily
         if not recipe:
-            return {}
+            self._attr_native_value = "Žádný recept"
+            self._attr_extra_state_attributes = {}
+            return
 
-        attributes = {
+        last_update = self._coordinator.last_update
+        self._attr_native_value = recipe.get("title")
+        self._attr_extra_state_attributes = {
             "recipe_id": recipe.get("id"),
             "title": recipe.get("title"),
             "url": recipe.get("url"),
             "image_url": recipe.get("image_url"),
-            "local_image": self._local_image_path,
+            "local_image": recipe.get("local_image"),
             "description": recipe.get("description"),
             "prep_time": recipe.get("prep_time"),
             "servings": recipe.get("servings"),
             "rating": recipe.get("rating"),
             "difficulty": recipe.get("difficulty"),
-            "last_update": self._coordinator.last_update.isoformat()
-            if self._coordinator.last_update
-            else None,
+            "last_update": last_update.isoformat() if last_update else None,
         }
-
-        return attributes
-
-    async def async_update(self) -> None:
-        """Update the sensor."""
-        # Check if we need to refresh recipes
-        if self._coordinator.last_update is None or (
-            datetime.now() - self._coordinator.last_update
-            > self._coordinator.update_interval
-        ):
-            await self._coordinator.async_fetch_recipes()
-
-        # Download image and fetch details for daily recipe if it changed
-        recipe = self._coordinator.get_daily_recipe()
-        if recipe:
-            recipe_id = recipe.get("id")
-            # Download image and fetch details only if recipe changed
-            if recipe_id != self._current_recipe_id:
-                self._current_recipe_id = recipe_id
-
-                # Download image
-                image_url = recipe.get("image_url")
-                if image_url:
-                    self._local_image_path = await self._coordinator.download_daily_recipe_image(image_url)
-                    _LOGGER.info(f"Downloaded daily recipe image: {self._local_image_path}")
-                else:
-                    self._local_image_path = None
-
-                # Fetch recipe details (prep time, servings, rating, difficulty, description)
-                recipe_url = recipe.get("url")
-                if recipe_url and not recipe.get("prep_time"):
-                    details = await self._coordinator.fetch_recipe_details(recipe_url)
-                    recipe["prep_time"] = details.get("prep_time")
-                    recipe["servings"] = details.get("servings")
-                    recipe["rating"] = details.get("rating")
-                    recipe["difficulty"] = details.get("difficulty")
-                    # Update description if we got a better one from detail page
-                    if details.get("description"):
-                        recipe["description"] = details.get("description")
-                    # Save updated recipe data
-                    await self._coordinator._save_recipes()
-                    _LOGGER.info(f"Fetched recipe details: prep_time={details.get('prep_time')}, servings={details.get('servings')}, rating={details.get('rating')}, difficulty={details.get('difficulty')}, description_length={len(details.get('description', ''))}")

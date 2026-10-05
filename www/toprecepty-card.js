@@ -5,6 +5,7 @@ class TopReceptyCard extends HTMLElement {
     }
 
     this.config = config;
+    this._rendered = false;
 
     if (!this.content) {
       this.innerHTML = `
@@ -149,105 +150,91 @@ class TopReceptyCard extends HTMLElement {
 
     const entity = hass.states[this.config.entity];
 
-    if (!entity) {
-      this.content.innerHTML = `
-        <div class="no-recipe">
-          <ha-icon icon="mdi:alert-circle"></ha-icon>
-          <p>Entita nenalezena: ${this.config.entity}</p>
-        </div>
-      `;
+    // hass is set on every state change in Home Assistant - only re-render
+    // when our entity actually changed.
+    if (entity === this._entity && this._rendered) {
       return;
     }
+    this._entity = entity;
+    this._rendered = true;
 
-    const attributes = entity.attributes;
-
-    // Update title
-    const titleElement = this.querySelector('.recipe-title');
-    if (titleElement) {
-      titleElement.textContent = attributes.title || 'Žádný recept';
+    if (!entity) {
+      this._showMessage(`Entita nenalezena: ${this.config.entity}`);
+      return;
+    }
+    if (this._message) {
+      this._message.remove();
+      this._message = null;
+      this.content.style.display = '';
     }
 
-    // Update image - prefer local_image, fallback to image_url
-    const imageElement = this.querySelector('.recipe-image');
-    const imageContainer = this.querySelector('.recipe-image-container');
-    if (imageElement && imageContainer) {
-      // Use local_image if available, otherwise use image_url
-      let imageSource = null;
+    const a = entity.attributes;
+    const valid = (v) => v !== undefined && v !== null && v !== '' && v !== 'None';
 
-      if (attributes.local_image && attributes.local_image !== 'None' && attributes.local_image !== '') {
-        imageSource = attributes.local_image;
-        console.log('TopRecepty: Using local image:', imageSource);
-      } else if (attributes.image_url && attributes.image_url !== 'None' && attributes.image_url !== '') {
-        imageSource = attributes.image_url;
-        console.log('TopRecepty: Using remote image:', imageSource);
+    this._setText('.recipe-title', a.title || 'Žádný recept');
+
+    // Image - prefer local copy (has ?v=<recipe_id> so the browser never
+    // shows a cached photo of a previous recipe), fallback to remote URL.
+    const img = this.querySelector('.recipe-image');
+    const imgContainer = this.querySelector('.recipe-image-container');
+    const local = valid(a.local_image) ? a.local_image : null;
+    const remote = valid(a.image_url) ? a.image_url : null;
+    const source = local || remote;
+    if (source) {
+      img.onerror = () => {
+        if (remote && img.getAttribute('src') !== remote) {
+          img.src = remote;
+        } else {
+          imgContainer.style.display = 'none';
+        }
+      };
+      if (img.getAttribute('src') !== source) {
+        img.src = source;
       }
-
-      if (imageSource) {
-        imageElement.src = imageSource;
-        imageElement.alt = attributes.title || 'Náhled receptu';
-        imageContainer.style.display = 'block';
-
-        // Add error handler for image loading
-        imageElement.onerror = () => {
-          console.error('TopRecepty: Failed to load image:', imageSource);
-          // Try fallback to remote image if local fails
-          if (imageSource === attributes.local_image && attributes.image_url) {
-            console.log('TopRecepty: Trying fallback to remote image');
-            imageElement.src = attributes.image_url;
-          } else {
-            imageContainer.style.display = 'none';
-          }
-        };
-      } else {
-        console.log('TopRecepty: No image available');
-        imageContainer.style.display = 'none';
-      }
+      img.alt = a.title || 'Náhled receptu';
+      imgContainer.style.display = 'block';
+    } else {
+      img.removeAttribute('src');
+      imgContainer.style.display = 'none';
     }
 
-    // Update description
-    const descElement = this.querySelector('.recipe-description');
-    if (descElement) {
-      if (attributes.description && attributes.description !== 'None' && attributes.description !== '') {
-        descElement.textContent = attributes.description;
-        descElement.style.display = 'block';
-        console.log('TopRecepty: Showing description:', attributes.description.substring(0, 50) + '...');
-      } else {
-        descElement.style.display = 'none';
-        console.log('TopRecepty: No description available');
-      }
+    const desc = this.querySelector('.recipe-description');
+    if (valid(a.description)) {
+      desc.textContent = a.description;
+      desc.style.display = 'block';
+    } else {
+      desc.style.display = 'none';
     }
 
-    // Update prep time
-    const prepTimeElement = this.querySelector('.prep-time');
-    if (prepTimeElement) {
-      prepTimeElement.textContent = attributes.prep_time || 'N/A';
-      console.log('TopRecepty: prep_time =', attributes.prep_time);
-    }
+    this._setText('.prep-time', valid(a.prep_time) ? a.prep_time : 'N/A');
+    this._setText('.rating', valid(a.rating) ? a.rating : '?');
+    this._setText('.difficulty', valid(a.difficulty) ? a.difficulty : '?');
 
-    // Update rating
-    const ratingElement = this.querySelector('.rating');
-    if (ratingElement) {
-      ratingElement.textContent = attributes.rating || '?';
-      console.log('TopRecepty: rating =', attributes.rating);
+    const link = this.querySelector('.recipe-link');
+    if (valid(a.url)) {
+      link.href = a.url;
+      link.style.display = 'block';
+    } else {
+      link.style.display = 'none';
     }
+  }
 
-    // Update difficulty
-    const difficultyElement = this.querySelector('.difficulty');
-    if (difficultyElement) {
-      difficultyElement.textContent = attributes.difficulty || '?';
-      console.log('TopRecepty: difficulty =', attributes.difficulty);
+  _setText(selector, text) {
+    const el = this.querySelector(selector);
+    if (el && el.textContent !== text) {
+      el.textContent = text;
     }
+  }
 
-    // Update link - always show button if URL exists
-    const linkElement = this.querySelector('.recipe-link');
-    if (linkElement) {
-      if (attributes.url) {
-        linkElement.href = attributes.url;
-        linkElement.style.display = 'block';
-      } else {
-        linkElement.style.display = 'none';
-      }
+  _showMessage(text) {
+    if (!this._message) {
+      this._message = document.createElement('div');
+      this._message.className = 'no-recipe';
+      this._message.innerHTML = '<ha-icon icon="mdi:alert-circle"></ha-icon><p></p>';
+      this.content.parentNode.insertBefore(this._message, this.content);
     }
+    this._message.querySelector('p').textContent = text;
+    this.content.style.display = 'none';
   }
 
   getCardSize() {
@@ -272,53 +259,45 @@ class TopReceptyCardEditor extends HTMLElement {
     this.render();
   }
 
+  set hass(hass) {
+    this._hass = hass;
+    if (this._picker) {
+      this._picker.hass = hass;
+    }
+  }
+
   render() {
     if (!this._config) {
       return;
     }
-
-    this.innerHTML = `
-      <div style="padding: 16px;">
-        <ha-entity-picker
-          label="Entita senzoru"
-          .hass="${this._hass}"
-          .value="${this._config.entity || ''}"
-          .configValue="${'entity'}"
-          @value-changed="${this._valueChanged}"
-          allow-custom-entity
-        ></ha-entity-picker>
-      </div>
-    `;
-  }
-
-  set hass(hass) {
-    this._hass = hass;
+    if (!this._picker) {
+      const wrapper = document.createElement('div');
+      wrapper.style.padding = '16px';
+      this._picker = document.createElement('ha-entity-picker');
+      this._picker.label = 'Entita senzoru';
+      this._picker.allowCustomEntity = true;
+      this._picker.addEventListener('value-changed', (ev) => this._valueChanged(ev));
+      wrapper.appendChild(this._picker);
+      this.appendChild(wrapper);
+    }
+    this._picker.hass = this._hass;
+    this._picker.value = this._config.entity || '';
   }
 
   _valueChanged(ev) {
-    if (!this._config || !this._hass) {
+    if (!this._config) {
       return;
     }
-
-    const target = ev.target;
-    const configValue = target.configValue;
     const value = ev.detail.value;
-
-    if (this._config[configValue] === value) {
+    if (this._config.entity === value) {
       return;
     }
-
-    this._config = {
-      ...this._config,
-      [configValue]: value,
-    };
-
-    const event = new CustomEvent('config-changed', {
+    this._config = { ...this._config, entity: value };
+    this.dispatchEvent(new CustomEvent('config-changed', {
       detail: { config: this._config },
       bubbles: true,
       composed: true,
-    });
-    this.dispatchEvent(event);
+    }));
   }
 }
 
