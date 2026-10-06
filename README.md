@@ -212,6 +212,15 @@ Interval se nastavuje při přidání integrace, ale můžete ho změnit:
 
 ## 📝 Changelog
 
+### Version 1.0.7 (2026-10-06)
+
+- ⏱️ **Opraveno** - čas přípravy, obtížnost a hodnocení se čtou jen z hlavičky receptu
+  (pod popisem, nad fotkou); ikony vedle obtížnosti/času již čtení nepřeruší
+- ⭐ **Opraveno** - hodnocení se čte i ze schema.org (`aggregateRating`), u nehodnocených
+  receptů karta zobrazí „Nehodnoceno“
+- ❌ Odstraněno hledání času/obtížnosti v celé stránce, které vracelo hodnoty
+  z menu nebo jiných receptů (např. vždy „20 min“ a „Snadný“)
+
 ### Version 1.0.6 (2026-10-05)
 
 - 🖼️ **Opraveno** - fotka nyní vždy odpovídá receptu:

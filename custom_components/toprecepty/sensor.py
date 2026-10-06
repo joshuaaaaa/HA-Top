@@ -41,7 +41,7 @@ REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 IMAGE_TIMEOUT = aiohttp.ClientTimeout(total=20)
 DAILY_IMAGE_FILENAME = "daily_recipe.jpg"
 # Bump to re-parse details of a cached daily recipe after parser changes
-DETAIL_PARSER_VERSION = 2
+DETAIL_PARSER_VERSION = 3
 
 # Attributes holding the real image URL on lazy-loaded <img> tags
 IMG_SRC_ATTRS = ("data-src", "data-lazy-src", "data-original", "data-srcset", "srcset", "src")
@@ -204,6 +204,15 @@ TIME_RE = re.compile(
 )
 
 
+DIFFICULTY_RE = re.compile(r"(snadn|střed|nároč|obtížn)\w*", re.IGNORECASE)
+DIFFICULTY_MAP = {
+    "snadn": "Snadný",
+    "střed": "Střední",
+    "nároč": "Náročný",
+    "obtížn": "Náročný",
+}
+
+
 def _format_duration(match: re.Match) -> str:
     """Format a TIME_RE match as e.g. "140 min" or "1 hod 30 min"."""
     hours, minutes, only_minutes = match.groups()
@@ -219,27 +228,38 @@ def _find_duration(text: str) -> str | None:
     return _format_duration(match) if match else None
 
 
-def _header_text(soup) -> str:
-    """Return text of the recipe header: from the title (h1) to the photo."""
+def _header_nodes(soup, photo_url: str | None) -> list[str]:
+    """Return text pieces of the recipe header (title -> description ->
+    difficulty / time / rating) - everything between h1 and the photo.
+
+    Small icons (difficulty bars, clock) are skipped, only the recipe
+    photo itself ends the header.
+    """
     h1 = soup.find("h1")
     if h1 is None:
-        return ""
-    parts: list[str] = []
+        return []
+    photo_path = urlparse(photo_url).path if photo_url else None
+    nodes: list[str] = []
     for element in h1.next_elements:
         name = getattr(element, "name", None)
-        if name in ("img", "picture", "figure", "video"):
+        if name in ("picture", "figure", "video"):
             break
+        if name == "img":
+            src = _img_url(element)
+            if photo_path and src and urlparse(src).path == photo_path:
+                break
+            continue
         if name is None and element.parent is not None and element.parent.name not in (
             "script",
             "style",
             "noscript",
         ):
-            text = str(element).strip()
+            text = " ".join(str(element).split())
             if text:
-                parts.append(text)
-                if len(parts) >= 60:
+                nodes.append(text)
+                if len(nodes) >= 150:
                     break
-    return " ".join(parts)
+    return nodes
 
 
 def _schema_duration(soup) -> str | None:
@@ -261,6 +281,36 @@ def _schema_duration(soup) -> str | None:
             if total:
                 return f"{total} min"
     return None
+
+
+def _schema_rating(soup) -> str | None:
+    """Read aggregateRating from schema.org data, e.g. "4,7 (84x)"."""
+    value = count = None
+    tag = soup.find(attrs={"itemprop": "ratingValue"})
+    if tag is not None:
+        value = tag.get("content") or tag.get_text(strip=True)
+        count_tag = soup.find(attrs={"itemprop": ["ratingCount", "reviewCount"]})
+        if count_tag is not None:
+            count = count_tag.get("content") or count_tag.get_text(strip=True)
+    if not value:
+        for script in soup.find_all("script", type="application/ld+json"):
+            text = script.string or ""
+            found = re.search(r'"ratingValue"\s*:\s*"?([\d.,]+)', text)
+            if found:
+                value = found.group(1)
+                found = re.search(r'"(?:ratingCount|reviewCount)"\s*:\s*"?(\d+)', text)
+                count = found.group(1) if found else None
+                break
+    if not value:
+        return None
+    try:
+        number = float(str(value).replace(",", "."))
+    except ValueError:
+        return None
+    if number <= 0:
+        return None
+    rating = f"{number:.1f}".replace(".", ",")
+    return f"{rating} ({count}x)" if count and count != "0" else rating
 
 
 def parse_detail(html: str) -> dict:
@@ -299,45 +349,35 @@ def parse_detail(html: str) -> dict:
                 break
 
     page_text = soup.get_text(" ")
-    page_text_lower = page_text.lower()
-    header_text = _header_text(soup)
+    header = _header_nodes(soup, details["image_url"])
 
-    # Prep time is shown in the header under the description and above
-    # the photo (e.g. "Snadný   140 min") - read it from there first.
-    details["prep_time"] = _find_duration(header_text) or _schema_duration(soup)
+    # Prep time is shown in the header under the description and above the
+    # photo as its own element (e.g. "140 min"). Only whole elements are
+    # accepted, so times mentioned in the description/steps are ignored.
+    for text in header:
+        match = TIME_RE.fullmatch(text)
+        if match:
+            details["prep_time"] = _format_duration(match)
+            break
     if not details["prep_time"]:
-        for match in TIME_RE.finditer(page_text):
-            context = page_text_lower[max(0, match.start() - 20) : match.end() + 20]
-            if any(kw in context for kw in ("čas", "příprav", "celkem")):
-                details["prep_time"] = _format_duration(match)
-                break
+        details["prep_time"] = _schema_duration(soup)
+
+    for text in header:
+        match = DIFFICULTY_RE.fullmatch(text)
+        if match:
+            details["difficulty"] = DIFFICULTY_MAP[match.group(1).lower()]
+            break
+
+    details["rating"] = _schema_rating(soup)
+    if not details["rating"]:
+        header_text = " ".join(header)
+        rating = re.search(r"(\d+[,\.]\d+)\s*\(\s*(\d+)\s*x?\s*\)", header_text)
+        if rating:
+            details["rating"] = f"{rating.group(1).replace('.', ',')} ({rating.group(2)}x)"
 
     servings = re.search(r"(\d+)\s*porc", page_text, re.IGNORECASE)
     if servings:
         details["servings"] = int(servings.group(1))
-
-    rating = re.search(r"(\d+[,\.]\d+)\s*\((\d+)x?\)", page_text)
-    if rating:
-        details["rating"] = f"{rating.group(1).replace('.', ',')} ({rating.group(2)}x)"
-    else:
-        rating = re.search(r"(\d+[,\.]\d+)\s*★", page_text)
-        if rating:
-            details["rating"] = rating.group(1).replace(".", ",")
-
-    for keyword, value in (
-        ("snadn", "Snadný"),
-        ("střed", "Střední"),
-        ("nároč", "Náročný"),
-        ("obtíž", "Náročný"),
-    ):
-        if keyword in header_text.lower():
-            details["difficulty"] = value
-            break
-    if not details["difficulty"]:
-        for keyword, value in (("snadn", "Snadný"), ("střed", "Střední"), ("nároč", "Náročný")):
-            if keyword in page_text_lower:
-                details["difficulty"] = value
-                break
 
     return details
 

@@ -207,7 +207,7 @@ class TopReceptyCard extends HTMLElement {
     }
 
     this._setText('.prep-time', valid(a.prep_time) ? a.prep_time : 'N/A');
-    this._setText('.rating', valid(a.rating) ? a.rating : '?');
+    this._setText('.rating', valid(a.rating) ? a.rating : 'Nehodnoceno');
     this._setText('.difficulty', valid(a.difficulty) ? a.difficulty : '?');
 
     const link = this.querySelector('.recipe-link');
