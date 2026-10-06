@@ -228,6 +228,7 @@ Interval se nastavuje při přidání integrace, ale můžete ho změnit:
   - karta se překresluje jen při změně senzoru, odstraněny konzolové výpisy
 - 🔒 Stabilní ID receptu (stejné i po restartu), denní recept se během dne nemění
 - 🛠️ Opraven editor karty
+- ⏱️ **Opraveno** - čas přípravy se čte z hlavičky receptu (pod popisem, nad fotkou, např. „140 min“), záložně ze schema.org (`totalTime`); dříve se mohl vzít čas z postupu
 
 ### Version 1.0.5 (2026-01-16)
 

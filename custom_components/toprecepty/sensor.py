@@ -40,6 +40,8 @@ _LOGGER = logging.getLogger(__name__)
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 IMAGE_TIMEOUT = aiohttp.ClientTimeout(total=20)
 DAILY_IMAGE_FILENAME = "daily_recipe.jpg"
+# Bump to re-parse details of a cached daily recipe after parser changes
+DETAIL_PARSER_VERSION = 2
 
 # Attributes holding the real image URL on lazy-loaded <img> tags
 IMG_SRC_ATTRS = ("data-src", "data-lazy-src", "data-original", "data-srcset", "srcset", "src")
@@ -195,6 +197,72 @@ def parse_listing(html: str) -> list[dict]:
     return recipes
 
 
+TIME_RE = re.compile(
+    r"(?<![\d,.])(\d+)\s*(?:hod(?:in[ay]?)?|h)\b(?:\s*(\d+)\s*min(?:ut[ay]?)?\b)?"
+    r"|(?<![\d,.])(\d+)\s*min(?:ut[ay]?)?\b",
+    re.IGNORECASE,
+)
+
+
+def _format_duration(match: re.Match) -> str:
+    """Format a TIME_RE match as e.g. "140 min" or "1 hod 30 min"."""
+    hours, minutes, only_minutes = match.groups()
+    if only_minutes:
+        return f"{int(only_minutes)} min"
+    if minutes:
+        return f"{int(hours)} hod {int(minutes)} min"
+    return f"{int(hours)} hod"
+
+
+def _find_duration(text: str) -> str | None:
+    match = TIME_RE.search(text)
+    return _format_duration(match) if match else None
+
+
+def _header_text(soup) -> str:
+    """Return text of the recipe header: from the title (h1) to the photo."""
+    h1 = soup.find("h1")
+    if h1 is None:
+        return ""
+    parts: list[str] = []
+    for element in h1.next_elements:
+        name = getattr(element, "name", None)
+        if name in ("img", "picture", "figure", "video"):
+            break
+        if name is None and element.parent is not None and element.parent.name not in (
+            "script",
+            "style",
+            "noscript",
+        ):
+            text = str(element).strip()
+            if text:
+                parts.append(text)
+                if len(parts) >= 60:
+                    break
+    return " ".join(parts)
+
+
+def _schema_duration(soup) -> str | None:
+    """Read totalTime/prepTime (ISO 8601, e.g. PT140M) from schema.org data."""
+    candidates: list[str] = []
+    for key in ("totalTime", "prepTime"):
+        tag = soup.find(attrs={"itemprop": key})
+        if tag is not None:
+            candidates.append(tag.get("content") or tag.get("datetime") or "")
+    for script in soup.find_all("script", type="application/ld+json"):
+        for key in ("totalTime", "prepTime"):
+            found = re.search(rf'"{key}"\s*:\s*"([^"]+)"', script.string or "")
+            if found:
+                candidates.append(found.group(1))
+    for value in candidates:
+        iso = re.fullmatch(r"P(?:\d+D)?T?(?:(\d+)H)?(?:(\d+)M)?", value.strip(), re.IGNORECASE)
+        if iso and (iso.group(1) or iso.group(2)):
+            total = int(iso.group(1) or 0) * 60 + int(iso.group(2) or 0)
+            if total:
+                return f"{total} min"
+    return None
+
+
 def parse_detail(html: str) -> dict:
     """Parse a recipe detail page."""
     details = {
@@ -232,12 +300,17 @@ def parse_detail(html: str) -> dict:
 
     page_text = soup.get_text(" ")
     page_text_lower = page_text.lower()
+    header_text = _header_text(soup)
 
-    for match in re.finditer(r"(\d+)\s*(min|minut|hod|hodin)", page_text, re.IGNORECASE):
-        context = page_text_lower[max(0, match.start() - 20) : match.end() + 20]
-        if any(kw in context for kw in ("čas", "příprav", "celkem")):
-            details["prep_time"] = match.group(0)
-            break
+    # Prep time is shown in the header under the description and above
+    # the photo (e.g. "Snadný   140 min") - read it from there first.
+    details["prep_time"] = _find_duration(header_text) or _schema_duration(soup)
+    if not details["prep_time"]:
+        for match in TIME_RE.finditer(page_text):
+            context = page_text_lower[max(0, match.start() - 20) : match.end() + 20]
+            if any(kw in context for kw in ("čas", "příprav", "celkem")):
+                details["prep_time"] = _format_duration(match)
+                break
 
     servings = re.search(r"(\d+)\s*porc", page_text, re.IGNORECASE)
     if servings:
@@ -257,9 +330,14 @@ def parse_detail(html: str) -> dict:
         ("nároč", "Náročný"),
         ("obtíž", "Náročný"),
     ):
-        if keyword in page_text_lower:
+        if keyword in header_text.lower():
             details["difficulty"] = value
             break
+    if not details["difficulty"]:
+        for keyword, value in (("snadn", "Snadný"), ("střed", "Střední"), ("nároč", "Náročný")):
+            if keyword in page_text_lower:
+                details["difficulty"] = value
+                break
 
     return details
 
@@ -374,7 +452,7 @@ class TopReceptyCoordinator:
         if (
             self.daily
             and self.daily.get("date") == today.isoformat()
-            and self.daily.get("details_fetched")
+            and self.daily.get("details_fetched") == DETAIL_PARSER_VERSION
             and await self._async_image_ok()
         ):
             return False
@@ -388,17 +466,18 @@ class TopReceptyCoordinator:
 
         daily = self.daily
 
-        if not daily.get("details_fetched"):
+        if daily.get("details_fetched") != DETAIL_PARSER_VERSION:
             html = await self._async_get_text(daily["url"])
             if html:
                 details = await self.hass.async_add_executor_job(parse_detail, html)
-                for key in ("prep_time", "servings", "rating", "difficulty", "description"):
-                    if details.get(key):
-                        daily[key] = details[key]
+                for key in ("prep_time", "servings", "rating", "difficulty"):
+                    daily[key] = details.get(key)
+                if details.get("description"):
+                    daily["description"] = details["description"]
                 # Image from the recipe page itself always matches the recipe
                 if details.get("image_url"):
                     daily["image_url"] = details["image_url"]
-                daily["details_fetched"] = True
+                daily["details_fetched"] = DETAIL_PARSER_VERSION
 
         daily["local_image"] = await self._async_download_image(
             daily.get("image_url"), daily["id"]
