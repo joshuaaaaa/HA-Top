@@ -212,6 +212,13 @@ Interval se nastavuje při přidání integrace, ale můžete ho změnit:
 
 ## 📝 Changelog
 
+### Version 1.0.8 (2026-10-07)
+
+- ⏱️ **Opraveno** - čas přípravy se bral z `prepTime` (např. 45 min) místo z hlavičky
+  receptu (60 min): avatar autora u nadpisu předčasně ukončil čtení hlavičky
+- ⭐ **Opraveno** - hodnocení ve tvaru „4,7 (409×)“ (znak ×) se nyní načte
+- 🔍 Nadpis receptu se rozlišuje od případného `h1` s logem webu
+
 ### Version 1.0.7 (2026-10-06)
 
 - ⏱️ **Opraveno** - čas přípravy, obtížnost a hodnocení se čtou jen z hlavičky receptu

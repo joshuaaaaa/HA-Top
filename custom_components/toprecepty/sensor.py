@@ -41,7 +41,7 @@ REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 IMAGE_TIMEOUT = aiohttp.ClientTimeout(total=20)
 DAILY_IMAGE_FILENAME = "daily_recipe.jpg"
 # Bump to re-parse details of a cached daily recipe after parser changes
-DETAIL_PARSER_VERSION = 3
+DETAIL_PARSER_VERSION = 4
 
 # Attributes holding the real image URL on lazy-loaded <img> tags
 IMG_SRC_ATTRS = ("data-src", "data-lazy-src", "data-original", "data-srcset", "srcset", "src")
@@ -235,18 +235,19 @@ def _header_nodes(soup, photo_url: str | None) -> list[str]:
     Small icons (difficulty bars, clock) are skipped, only the recipe
     photo itself ends the header.
     """
-    h1 = soup.find("h1")
+    h1 = _title_h1(soup)
     if h1 is None:
         return []
     photo_path = urlparse(photo_url).path if photo_url else None
+    photo_name = photo_path.rsplit("/", 1)[-1] if photo_path else None
     nodes: list[str] = []
     for element in h1.next_elements:
         name = getattr(element, "name", None)
-        if name in ("picture", "figure", "video"):
-            break
         if name == "img":
+            # Author avatar, icons etc. are skipped - only the recipe photo
+            # ends the header.
             src = _img_url(element)
-            if photo_path and src and urlparse(src).path == photo_path:
+            if photo_name and src and urlparse(src).path.rsplit("/", 1)[-1] == photo_name:
                 break
             continue
         if name is None and element.parent is not None and element.parent.name not in (
@@ -262,15 +263,32 @@ def _header_nodes(soup, photo_url: str | None) -> list[str]:
     return nodes
 
 
+def _title_h1(soup):
+    """Return the h1 with the recipe title (not a logo in the page header)."""
+    headings = soup.find_all("h1")
+    if not headings:
+        return None
+    og_title = soup.find("meta", attrs={"property": "og:title"})
+    og_title = (og_title.get("content") or "").lower() if og_title else ""
+    for h1 in headings:
+        text = h1.get_text(" ", strip=True).lower()
+        if text and og_title and (text in og_title or og_title in text):
+            return h1
+    for h1 in headings:
+        if h1.get_text(strip=True) and not h1.find_parent(["header", "nav", "a"]):
+            return h1
+    return headings[0]
+
+
 def _schema_duration(soup) -> str | None:
     """Read totalTime/prepTime (ISO 8601, e.g. PT140M) from schema.org data."""
     candidates: list[str] = []
+    # totalTime is what the recipe page shows - prefer it over prepTime
     for key in ("totalTime", "prepTime"):
         tag = soup.find(attrs={"itemprop": key})
         if tag is not None:
             candidates.append(tag.get("content") or tag.get("datetime") or "")
-    for script in soup.find_all("script", type="application/ld+json"):
-        for key in ("totalTime", "prepTime"):
+        for script in soup.find_all("script", type="application/ld+json"):
             found = re.search(rf'"{key}"\s*:\s*"([^"]+)"', script.string or "")
             if found:
                 candidates.append(found.group(1))
@@ -310,7 +328,7 @@ def _schema_rating(soup) -> str | None:
     if number <= 0:
         return None
     rating = f"{number:.1f}".replace(".", ",")
-    return f"{rating} ({count}x)" if count and count != "0" else rating
+    return f"{rating} ({count}×)" if count and count != "0" else rating
 
 
 def parse_detail(html: str) -> dict:
@@ -368,12 +386,14 @@ def parse_detail(html: str) -> dict:
             details["difficulty"] = DIFFICULTY_MAP[match.group(1).lower()]
             break
 
-    details["rating"] = _schema_rating(soup)
-    if not details["rating"]:
-        header_text = " ".join(header)
-        rating = re.search(r"(\d+[,\.]\d+)\s*\(\s*(\d+)\s*x?\s*\)", header_text)
-        if rating:
-            details["rating"] = f"{rating.group(1).replace('.', ',')} ({rating.group(2)}x)"
+    # Rating as shown in the header, e.g. "4,7 (409×)" (× or x)
+    rating = re.search(
+        r"(?<![\d,.])(\d+[,\.]\d+)\s*\(\s*(\d+)\s*[x×]?\s*\)", " ".join(header), re.IGNORECASE
+    )
+    if rating:
+        details["rating"] = f"{rating.group(1).replace('.', ',')} ({rating.group(2)}×)"
+    else:
+        details["rating"] = _schema_rating(soup)
 
     servings = re.search(r"(\d+)\s*porc", page_text, re.IGNORECASE)
     if servings:
